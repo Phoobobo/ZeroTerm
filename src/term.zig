@@ -98,11 +98,23 @@ fn onReadable(ctx: ?*anyopaque) callconv(.c) void {
     const term: *Terminal = @ptrCast(@alignCast(ctx orelse return));
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = term.pty.read(&buf) catch return;
-        if (n == 0) break;
-        const sink = Sink{ .term = term };
-        term.parser.feed(buf[0..n], sink);
-        if (n < buf.len) break;
+        const res = term.pty.read(&buf);
+        switch (res.status) {
+            .got => {
+                const sink = Sink{ .term = term };
+                term.parser.feed(buf[0..res.n], sink);
+                if (res.n < buf.len) break;
+            },
+            .would_block => break,
+            .eof => {
+                // Shell exited — cancel the source so we stop busy-looping.
+                if (term.source) |s| {
+                    objc.dispatch_source_cancel(s);
+                    term.source = null;
+                }
+                break;
+            },
+        }
     }
     if (g_dirty) |cb| cb();
 }

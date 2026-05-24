@@ -54,14 +54,16 @@ pub const Pty = struct {
         if (c.ioctl(self.master, c.TIOCSWINSZ, &ws) < 0) return error.ResizeFailed;
     }
 
-    pub fn read(self: Pty, buf: []u8) !usize {
+    pub const ReadStatus = enum { got, would_block, eof };
+    pub const ReadResult = struct { n: usize, status: ReadStatus };
+
+    pub fn read(self: Pty, buf: []u8) ReadResult {
         const n = c.read(self.master, buf.ptr, buf.len);
-        if (n < 0) {
-            const e = std.c._errno().*;
-            if (e == c.EAGAIN) return 0;
-            return error.ReadFailed;
-        }
-        return @intCast(n);
+        if (n > 0) return .{ .n = @intCast(n), .status = .got };
+        if (n == 0) return .{ .n = 0, .status = .eof };
+        const e = std.c._errno().*;
+        if (e == c.EAGAIN) return .{ .n = 0, .status = .would_block };
+        return .{ .n = 0, .status = .eof };
     }
 
     pub fn write(self: Pty, buf: []const u8) !usize {
