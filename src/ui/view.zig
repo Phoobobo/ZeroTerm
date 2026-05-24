@@ -223,18 +223,40 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
             else => {},
         }
 
-        // Cmd-Opt-arrows cycle panes.
+        // Cmd-Opt-arrows: directional pane navigation.
         if (opt) switch (first_ch) {
-            NSLeftArrowFunctionKey, NSUpArrowFunctionKey => {
-                state.cyclePane(-1);
+            NSLeftArrowFunctionKey => {
+                state.focusInDirection(.left);
                 return true;
             },
-            NSRightArrowFunctionKey, NSDownArrowFunctionKey => {
-                state.cyclePane(1);
+            NSRightArrowFunctionKey => {
+                state.focusInDirection(.right);
+                return true;
+            },
+            NSUpArrowFunctionKey => {
+                state.focusInDirection(.up);
+                return true;
+            },
+            NSDownArrowFunctionKey => {
+                state.focusInDirection(.down);
                 return true;
             },
             else => {},
         };
+
+        // Cmd-Shift-G → lazygit, Cmd-Shift-Y → yazi (Kaku quick-launch).
+        if (shift) switch (first_ch) {
+            'g', 'G' => {
+                if (state.focusedTerminal()) |t| t.write("lazygit\n") catch {};
+                return true;
+            },
+            'y', 'Y' => {
+                if (state.focusedTerminal()) |t| t.write("yazi\n") catch {};
+                return true;
+            },
+            else => {},
+        };
+
         return false;
     }
 

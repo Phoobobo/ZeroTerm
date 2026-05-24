@@ -269,6 +269,45 @@ pub const State = struct {
         }
     }
 
+    pub const Direction = enum { left, right, up, down };
+
+    /// Focus the pane spatially in the given direction from the active one,
+    /// using the rects cached during the last draw pass.
+    pub fn focusInDirection(self: *State, dir: Direction) void {
+        const current_id = self.currentTab().active;
+        var current_rect: ?Rect = null;
+        for (self.pane_hits.items) |h| {
+            if (h.id == current_id) {
+                current_rect = h.rect;
+                break;
+            }
+        }
+        const c = current_rect orelse return;
+        const c_cx = c.x + c.w / 2;
+        const c_cy = c.y + c.h / 2;
+        var best_id: ?PaneId = null;
+        var best_dist: f64 = std.math.inf(f64);
+        for (self.pane_hits.items) |h| {
+            if (h.id == current_id) continue;
+            const valid = switch (dir) {
+                .left => h.rect.x + h.rect.w <= c.x + 4,
+                .right => h.rect.x >= c.x + c.w - 4,
+                // Unflipped coords: y grows up, so "up" means higher y.
+                .up => h.rect.y >= c.y + c.h - 4,
+                .down => h.rect.y + h.rect.h <= c.y + 4,
+            };
+            if (!valid) continue;
+            const dx = (h.rect.x + h.rect.w / 2) - c_cx;
+            const dy = (h.rect.y + h.rect.h / 2) - c_cy;
+            const d = dx * dx + dy * dy;
+            if (d < best_dist) {
+                best_dist = d;
+                best_id = h.id;
+            }
+        }
+        if (best_id) |id| self.currentTab().active = id;
+    }
+
     pub fn cyclePane(self: *State, delta: isize) void {
         const tab = self.currentTab();
         var leaves: std.ArrayList(PaneId) = .empty;
