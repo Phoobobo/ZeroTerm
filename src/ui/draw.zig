@@ -13,38 +13,107 @@ const State = st.State;
 const Pane = st.Pane;
 const Rect = st.Rect;
 
-// Palette tuned for the cream background.
-const c_paper = [4]f64{ 0.953, 0.925, 0.870, 1.0 };
-const c_tab_active_bg = [4]f64{ 0.890, 0.863, 0.806, 1.0 };
-const c_text_active = [4]f64{ 0.180, 0.160, 0.120, 1.0 };
-const c_text_muted = [4]f64{ 0.490, 0.450, 0.380, 1.0 };
-const c_divider = [4]f64{ 0.580, 0.530, 0.450, 0.55 };
-const c_separator = [4]f64{ 0.700, 0.660, 0.580, 0.40 };
-const c_active_pane_outline = [4]f64{ 0.640, 0.580, 0.460, 0.45 };
-const c_cursor = [4]f64{ 0.180, 0.160, 0.120, 0.32 };
-
-// Default cell colors for the terminal grid.
-const c_default_fg = [4]f64{ 0.130, 0.115, 0.085, 1.0 };
-
-// 16-colour ANSI palette tuned for paper. Picked to read well at ~13pt.
-const ansi_palette: [16][3]f64 = .{
-    .{ 0.07, 0.20, 0.26 }, // 0 black (dark teal/ink)
-    .{ 0.78, 0.18, 0.14 }, // 1 red
-    .{ 0.40, 0.55, 0.00 }, // 2 green
-    .{ 0.69, 0.48, 0.00 }, // 3 yellow / amber
-    .{ 0.15, 0.45, 0.74 }, // 4 blue
-    .{ 0.62, 0.19, 0.55 }, // 5 magenta
-    .{ 0.15, 0.55, 0.55 }, // 6 cyan
-    .{ 0.55, 0.50, 0.42 }, // 7 light grey
-    .{ 0.45, 0.42, 0.38 }, // 8 bright black
-    .{ 0.86, 0.25, 0.16 }, // 9 bright red
-    .{ 0.46, 0.61, 0.13 }, // 10 bright green
-    .{ 0.78, 0.55, 0.04 }, // 11 bright yellow
-    .{ 0.27, 0.55, 0.83 }, // 12 bright blue
-    .{ 0.70, 0.27, 0.62 }, // 13 bright magenta
-    .{ 0.18, 0.62, 0.62 }, // 14 bright cyan
-    .{ 0.32, 0.28, 0.22 }, // 15 bright white (deep ink)
+/// Theme palette. Two presets — paper-light and ink-dark — picked at startup
+/// from `NSApp.effectiveAppearance` and refreshed on macOS appearance changes.
+const Palette = struct {
+    paper: [4]f64,
+    tab_active_bg: [4]f64,
+    text_active: [4]f64,
+    text_muted: [4]f64,
+    divider: [4]f64,
+    separator: [4]f64,
+    active_pane_outline: [4]f64,
+    cursor: [4]f64,
+    selection: [4]f64,
+    bell_flash: [4]f64,
+    default_fg: [4]f64,
+    ansi: [16][3]f64,
 };
+
+const palette_light: Palette = .{
+    .paper = .{ 0.953, 0.925, 0.870, 1.0 },
+    .tab_active_bg = .{ 0.890, 0.863, 0.806, 1.0 },
+    .text_active = .{ 0.180, 0.160, 0.120, 1.0 },
+    .text_muted = .{ 0.490, 0.450, 0.380, 1.0 },
+    .divider = .{ 0.580, 0.530, 0.450, 0.55 },
+    .separator = .{ 0.700, 0.660, 0.580, 0.40 },
+    .active_pane_outline = .{ 0.640, 0.580, 0.460, 0.45 },
+    .cursor = .{ 0.180, 0.160, 0.120, 0.32 },
+    .selection = .{ 0.620, 0.550, 0.410, 0.28 },
+    .bell_flash = .{ 0.85, 0.55, 0.10, 0.35 },
+    .default_fg = .{ 0.130, 0.115, 0.085, 1.0 },
+    .ansi = .{
+        .{ 0.07, 0.20, 0.26 },
+        .{ 0.78, 0.18, 0.14 },
+        .{ 0.40, 0.55, 0.00 },
+        .{ 0.69, 0.48, 0.00 },
+        .{ 0.15, 0.45, 0.74 },
+        .{ 0.62, 0.19, 0.55 },
+        .{ 0.15, 0.55, 0.55 },
+        .{ 0.55, 0.50, 0.42 },
+        .{ 0.45, 0.42, 0.38 },
+        .{ 0.86, 0.25, 0.16 },
+        .{ 0.46, 0.61, 0.13 },
+        .{ 0.78, 0.55, 0.04 },
+        .{ 0.27, 0.55, 0.83 },
+        .{ 0.70, 0.27, 0.62 },
+        .{ 0.18, 0.62, 0.62 },
+        .{ 0.32, 0.28, 0.22 },
+    },
+};
+
+const palette_dark: Palette = .{
+    .paper = .{ 0.090, 0.092, 0.110, 1.0 },
+    .tab_active_bg = .{ 0.150, 0.152, 0.180, 1.0 },
+    .text_active = .{ 0.910, 0.890, 0.820, 1.0 },
+    .text_muted = .{ 0.520, 0.510, 0.470, 1.0 },
+    .divider = .{ 0.420, 0.420, 0.470, 0.55 },
+    .separator = .{ 0.260, 0.260, 0.310, 0.55 },
+    .active_pane_outline = .{ 0.520, 0.500, 0.420, 0.40 },
+    .cursor = .{ 0.910, 0.890, 0.820, 0.34 },
+    .selection = .{ 0.460, 0.440, 0.360, 0.32 },
+    .bell_flash = .{ 0.90, 0.55, 0.20, 0.30 },
+    .default_fg = .{ 0.910, 0.890, 0.820, 1.0 },
+    .ansi = .{
+        .{ 0.16, 0.16, 0.20 },
+        .{ 0.90, 0.30, 0.30 },
+        .{ 0.55, 0.78, 0.40 },
+        .{ 0.92, 0.78, 0.30 },
+        .{ 0.45, 0.70, 0.95 },
+        .{ 0.85, 0.50, 0.85 },
+        .{ 0.40, 0.85, 0.85 },
+        .{ 0.80, 0.78, 0.72 },
+        .{ 0.40, 0.40, 0.46 },
+        .{ 1.00, 0.45, 0.40 },
+        .{ 0.65, 0.92, 0.55 },
+        .{ 1.00, 0.88, 0.40 },
+        .{ 0.55, 0.80, 1.00 },
+        .{ 0.95, 0.60, 0.95 },
+        .{ 0.50, 0.95, 0.95 },
+        .{ 0.95, 0.93, 0.86 },
+    },
+};
+
+var palette: *const Palette = &palette_light;
+
+pub fn setDark(dark: bool) void {
+    palette = if (dark) &palette_dark else &palette_light;
+}
+
+pub fn refreshAppearance() void {
+    const NSApplication = objc.cls("NSApplication");
+    const shared = objc.send(objc.id, NSApplication, objc.sel("sharedApplication"));
+    const app_obj = if (shared == null) return else shared;
+    const appearance = objc.send(objc.id, app_obj, objc.sel("effectiveAppearance"));
+    if (appearance == null) return;
+    const name_obj = objc.send(objc.id, appearance, objc.sel("name"));
+    if (name_obj == null) return;
+    const utf8: ?[*:0]const u8 = objc.send(?[*:0]const u8, name_obj, objc.sel("UTF8String"));
+    if (utf8) |p| {
+        const slice = std.mem.span(p);
+        setDark(std.mem.indexOf(u8, slice, "Dark") != null);
+    }
+}
 
 const tab_bar_h: f64 = 28.0;
 const tab_padding_x: f64 = 12.0;
@@ -56,7 +125,7 @@ pub fn render(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
     state.pane_hits.clearRetainingCapacity();
 
     // 1. Paper background.
-    setFill(ctx, c_paper);
+    setFill(ctx, palette.paper);
     objc.CGContextFillRect(ctx, bounds);
 
     // 2. Pane area — everything above the tab strip.
@@ -76,7 +145,7 @@ pub fn render(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
         bounds.origin.x + bounds.size.w,
         bounds.origin.y + tab_bar_h,
         1.0,
-        c_separator,
+        palette.separator,
         null,
     );
 
@@ -89,9 +158,11 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
         .leaf => |l| {
             state.pane_hits.append(state.allocator, .{ .id = l.id, .rect = rect }) catch {};
             if (l.terminal) |t| {
-                drawTerminal(ctx, t, rect, l.id == state.currentTab().active);
+                const focused = l.id == state.currentTab().active;
+                const sel: ?st.Selection = if (state.selection) |s| (if (s.pane_id == l.id) s else null) else null;
+                drawTerminal(ctx, t, rect, focused, sel);
             } else if (l.id == state.currentTab().active and state.pane_hits.items.len > 1) {
-                strokeRect(ctx, inset(rect, 1.0), 1.0, c_active_pane_outline);
+                strokeRect(ctx, inset(rect, 1.0), 1.0, palette.active_pane_outline);
             }
         },
         .split => |s| switch (s.kind) {
@@ -108,7 +179,7 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
                     rect.x + left_w,
                     rect.y + rect.h - 4,
                     1.0,
-                    c_divider,
+                    palette.divider,
                     &.{ 2.0, 3.0 },
                 );
             },
@@ -125,7 +196,7 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
                     rect.x + rect.w - 4,
                     rect.y + rect.h - top_h,
                     1.0,
-                    c_divider,
+                    palette.divider,
                     &.{ 2.0, 3.0 },
                 );
             },
@@ -133,7 +204,7 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
     }
 }
 
-fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: bool) void {
+fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: bool, sel: ?st.Selection) void {
     const cell_w = font.metrics.cell_w;
     const cell_h = font.metrics.cell_h;
     // Resize the terminal to match the available rect.
@@ -203,11 +274,38 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
         }
     }
 
+    // Selection overlay (drawn after text so the highlight reads on top).
+    if (sel) |s| {
+        const norm = st.normalizedSelection(s);
+        var sr: u16 = norm.sr;
+        while (sr <= norm.er and sr < sc.rows) : (sr += 1) {
+            const start_col: u16 = if (sr == norm.sr) norm.sc else 0;
+            const end_col: u16 = if (sr == norm.er) @min(norm.ec, sc.cols - 1) else sc.cols - 1;
+            const cells_in_row: u16 = end_col + 1 - start_col;
+            const x0 = rect.x + @as(f64, @floatFromInt(start_col)) * cell_w;
+            const y0 = rect.y + rect.h - @as(f64, @floatFromInt(sr + 1)) * cell_h;
+            setFill(ctx, palette.selection);
+            objc.CGContextFillRect(ctx, .{
+                .origin = .{ .x = x0, .y = y0 },
+                .size = .{ .w = @as(f64, @floatFromInt(cells_in_row)) * cell_w, .h = cell_h },
+            });
+        }
+    }
+
+    // Visual bell — soft amber flash over the pane while bell is active.
+    if (objc.nowMs() < t.bell_until_ms) {
+        setFill(ctx, palette.bell_flash);
+        objc.CGContextFillRect(ctx, .{
+            .origin = .{ .x = rect.x, .y = rect.y },
+            .size = .{ .w = rect.w, .h = rect.h },
+        });
+    }
+
     // Cursor.
     if (focused and sc.cursor_visible and sc.cursor_row < sc.rows and sc.cursor_col < sc.cols) {
         const x0 = rect.x + @as(f64, @floatFromInt(sc.cursor_col)) * cell_w;
         const y0 = rect.y + rect.h - @as(f64, @floatFromInt(sc.cursor_row + 1)) * cell_h;
-        setFill(ctx, c_cursor);
+        setFill(ctx, palette.cursor);
         objc.CGContextFillRect(ctx, .{
             .origin = .{ .x = x0, .y = y0 },
             .size = .{ .w = cell_w, .h = cell_h },
@@ -235,7 +333,7 @@ fn colorEql(a: screen_mod.Color, b: screen_mod.Color) bool {
 
 fn colorRgb(color: screen_mod.Color) [3]f64 {
     return switch (color) {
-        .default => .{ c_paper[0], c_paper[1], c_paper[2] },
+        .default => .{ palette.paper[0], palette.paper[1], palette.paper[2] },
         .palette => |idx| palette256(idx),
         .rgb => |c| .{
             @as(f64, @floatFromInt(c[0])) / 255.0,
@@ -247,7 +345,7 @@ fn colorRgb(color: screen_mod.Color) [3]f64 {
 
 fn colorFgRgb(color: screen_mod.Color) [3]f64 {
     return switch (color) {
-        .default => .{ c_default_fg[0], c_default_fg[1], c_default_fg[2] },
+        .default => .{ palette.default_fg[0], palette.default_fg[1], palette.default_fg[2] },
         .palette => |idx| palette256(idx),
         .rgb => |c| .{
             @as(f64, @floatFromInt(c[0])) / 255.0,
@@ -258,7 +356,7 @@ fn colorFgRgb(color: screen_mod.Color) [3]f64 {
 }
 
 fn palette256(idx: u8) [3]f64 {
-    if (idx < 16) return ansi_palette[idx];
+    if (idx < 16) return palette.ansi[idx];
     if (idx < 232) {
         // 6x6x6 cube
         const n = idx - 16;
@@ -276,8 +374,8 @@ fn palette256(idx: u8) [3]f64 {
 fn drawTabs(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
     const bar_y = bounds.origin.y;
     var x = bounds.origin.x + tab_padding_x;
-    const attrs_active = makeTextAttrs(tab_font_size, c_text_active);
-    const attrs_muted = makeTextAttrs(tab_font_size, c_text_muted);
+    const attrs_active = makeTextAttrs(tab_font_size, palette.text_active);
+    const attrs_muted = makeTextAttrs(tab_font_size, palette.text_muted);
 
     for (state.tabs.items, 0..) |tab, idx| {
         const is_active = (idx == state.active_tab);
@@ -285,7 +383,7 @@ fn drawTabs(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
         const slot_w = text_w + 18;
         const slot_rect = Rect{ .x = x, .y = bar_y + 4, .w = slot_w, .h = tab_bar_h - 8 };
         if (is_active) {
-            setFill(ctx, c_tab_active_bg);
+            setFill(ctx, palette.tab_active_bg);
             objc.CGContextFillRect(ctx, .{
                 .origin = .{ .x = slot_rect.x, .y = slot_rect.y },
                 .size = .{ .w = slot_rect.w, .h = slot_rect.h },

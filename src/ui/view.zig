@@ -5,16 +5,22 @@
 const std = @import("std");
 const objc = @import("../objc.zig");
 const draw = @import("draw.zig");
+const font = @import("font.zig");
 const st = @import("state.zig");
 const term = @import("../term.zig");
+const windows = @import("windows.zig");
 
 const State = st.State;
 const SplitKind = st.SplitKind;
 
-// One window in this scaffold → a global state pointer is fine. Promote to an
-// associated object on the view when multi-window arrives.
-var g_state: ?*State = null;
-var g_view: objc.id = null;
+fn ctxOf(view_self: objc.id) ?*windows.WindowCtx {
+    return windows.findByView(view_self);
+}
+
+fn stateOf(view_self: objc.id) ?*State {
+    if (windows.findByView(view_self)) |ctx| return &ctx.state;
+    return null;
+}
 
 const NSEventModifierFlagShift: u64 = 1 << 17;
 const NSEventModifierFlagControl: u64 = 1 << 18;
@@ -48,15 +54,16 @@ pub fn registerClass() objc.Class {
     _ = objc.class_addMethod(cls, objc.sel("isFlipped"), @as(objc.IMP, @ptrCast(&implIsFlipped)), "c@:");
     _ = objc.class_addMethod(cls, objc.sel("keyDown:"), @as(objc.IMP, @ptrCast(&implKeyDown)), "v@:@");
     _ = objc.class_addMethod(cls, objc.sel("mouseDown:"), @as(objc.IMP, @ptrCast(&implMouseDown)), "v@:@");
+    _ = objc.class_addMethod(cls, objc.sel("mouseDragged:"), @as(objc.IMP, @ptrCast(&implMouseDragged)), "v@:@");
+    _ = objc.class_addMethod(cls, objc.sel("mouseUp:"), @as(objc.IMP, @ptrCast(&implMouseUp)), "v@:@");
     objc.objc_registerClassPair(cls);
     return cls;
 }
 
-pub fn install(state: *State) void {
-    g_state = state;
+pub fn install() void {
     // Register the dirty callback that Terminal.startPump will call when the
     // PTY emits output.
-    term.setDirtyCallback(&markGlobalDirty);
+    term.setDirtyCallback(&markAllDirty);
 }
 
 pub fn alloc(cls: objc.Class) objc.id {
@@ -64,12 +71,8 @@ pub fn alloc(cls: objc.Class) objc.id {
     return objc.send1(objc.id, inst, objc.sel("initWithFrame:"), objc.NSRect{});
 }
 
-pub fn setView(v: objc.id) void {
-    g_view = v;
-}
-
-fn markGlobalDirty() void {
-    if (g_view != null) markNeedsDisplay(g_view);
+fn markAllDirty() void {
+    windows.markAllDirty();
 }
 
 // --- IMP functions ----------------------------------------------------------
@@ -85,29 +88,45 @@ fn implIsFlipped(self: objc.id, _: objc.SEL) callconv(.c) objc.BOOL {
 }
 
 fn implDrawRect(self: objc.id, _: objc.SEL, _: objc.NSRect) callconv(.c) void {
-    const state = g_state orelse return;
+    const state = stateOf(self) orelse return;
     const bounds = objc.send(objc.NSRect, self, objc.sel("bounds"));
     const ctx = currentCGContext() orelse return;
     draw.render(ctx, bounds, state);
 }
 
 fn implKeyDown(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
-    const state = g_state orelse return;
+    const state = stateOf(self) orelse return;
     const consumed = handleKeyDown(event, state);
     if (consumed) markNeedsDisplay(self);
 }
 
 fn implMouseDown(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
-    const state = g_state orelse return;
+    const state = stateOf(self) orelse return;
+    const local = eventLocalPoint(self, event);
+    if (handleMouseDown(local, state)) markNeedsDisplay(self);
+}
+
+fn implMouseDragged(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
+    const state = stateOf(self) orelse return;
+    const local = eventLocalPoint(self, event);
+    if (handleMouseDragged(local, state)) markNeedsDisplay(self);
+}
+
+fn implMouseUp(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
+    const state = stateOf(self) orelse return;
+    _ = event;
+    if (handleMouseUp(state)) markNeedsDisplay(self);
+}
+
+fn eventLocalPoint(self: objc.id, event: objc.id) objc.NSPoint {
     const win_pt = objc.send(objc.NSPoint, event, objc.sel("locationInWindow"));
-    const local = objc.send2(
+    return objc.send2(
         objc.NSPoint,
         self,
         objc.sel("convertPoint:fromView:"),
         win_pt,
         @as(objc.id, null),
     );
-    if (handleMouseDown(local, state)) markNeedsDisplay(self);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -156,7 +175,7 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
                 return true;
             },
             'n', 'N' => {
-                // New window — not yet implemented (single-window scaffold).
+                windows.requestNewWindow();
                 return false;
             },
             'd', 'D' => {
@@ -182,6 +201,25 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
                 if (state.focusedTerminal()) |t| t.write("\x0C") catch {};
                 return true;
             },
+            'c', 'C' => {
+                if (state.selection) |sel| {
+                    if (state.terminalOf(sel.pane_id)) |t| {
+                        var buf: [16 * 1024]u8 = undefined;
+                        const n = extractSelection(t, sel, &buf);
+                        if (n > 0) copyToClipboard(buf[0..n]);
+                    }
+                }
+                return true;
+            },
+            'v', 'V' => {
+                pasteFromClipboard(state);
+                return true;
+            },
+            'a', 'A' => {
+                // Cmd-A: select all visible cells in the focused pane.
+                selectAll(state);
+                return true;
+            },
             else => {},
         }
 
@@ -201,6 +239,7 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
     }
 
     // Non-shortcut: route to the focused terminal as input bytes.
+    state.selection = null;
     const t = state.focusedTerminal() orelse return false;
     var seq_buf: [16]u8 = undefined;
     const out = translateKey(first_ch, mods, &seq_buf) orelse {
@@ -275,16 +314,190 @@ fn handleMouseDown(p: objc.NSPoint, state: *State) bool {
     for (state.tab_hits.items) |hit| {
         if (rectContains(hit.rect, p)) {
             state.selectTab(hit.idx);
+            state.selection = null;
             return true;
         }
     }
     for (state.pane_hits.items) |hit| {
         if (rectContains(hit.rect, p)) {
             state.currentTab().active = hit.id;
+            const cell = pointToCell(hit, p);
+            state.selection = .{
+                .pane_id = hit.id,
+                .anchor_col = cell.col,
+                .anchor_row = cell.row,
+                .end_col = cell.col,
+                .end_row = cell.row,
+                .dragging = true,
+            };
             return true;
         }
     }
     return false;
+}
+
+fn handleMouseDragged(p: objc.NSPoint, state: *State) bool {
+    var sel = state.selection orelse return false;
+    if (!sel.dragging) return false;
+    const hit = findPaneHit(state, sel.pane_id) orelse return false;
+    const cell = pointToCell(hit, p);
+    sel.end_col = cell.col;
+    sel.end_row = cell.row;
+    state.selection = sel;
+    return true;
+}
+
+fn handleMouseUp(state: *State) bool {
+    var sel = state.selection orelse return false;
+    if (!sel.dragging) return false;
+    sel.dragging = false;
+    state.selection = sel;
+    // Empty selection (no drag movement) → drop it and treat as a focus click.
+    if (sel.anchor_col == sel.end_col and sel.anchor_row == sel.end_row) {
+        state.selection = null;
+        return true;
+    }
+    // Copy the selected text to the system pasteboard.
+    if (state.terminalOf(sel.pane_id)) |t| {
+        var buf: [16 * 1024]u8 = undefined;
+        const n = extractSelection(t, sel, &buf);
+        if (n > 0) copyToClipboard(buf[0..n]);
+    }
+    return true;
+}
+
+const PointCell = struct { col: u16, row: u16 };
+
+fn pointToCell(hit: st.PaneHit, p: objc.NSPoint) PointCell {
+    const cell_w = font.metrics.cell_w;
+    const cell_h = font.metrics.cell_h;
+    const rel_x = p.x - hit.rect.x;
+    // Unflipped coords: y up. Top of pane is hit.rect.y + hit.rect.h; row 0 sits there.
+    const top_y = hit.rect.y + hit.rect.h;
+    const rel_y_from_top = top_y - p.y;
+    var col_i: i64 = @intFromFloat(@floor(rel_x / cell_w));
+    var row_i: i64 = @intFromFloat(@floor(rel_y_from_top / cell_h));
+    if (col_i < 0) col_i = 0;
+    if (row_i < 0) row_i = 0;
+    return .{ .col = @intCast(col_i), .row = @intCast(row_i) };
+}
+
+fn findPaneHit(state: *State, pane_id: st.PaneId) ?st.PaneHit {
+    for (state.pane_hits.items) |hit| {
+        if (hit.id == pane_id) return hit;
+    }
+    return null;
+}
+
+fn extractSelection(t: *term.Terminal, sel: st.Selection, buf: []u8) usize {
+    const norm = st.normalizedSelection(sel);
+    const sc = t.currentScreen();
+    var out: usize = 0;
+    var row: u16 = norm.sr;
+    while (row <= norm.er and row < sc.rows) : (row += 1) {
+        const start_col: u16 = if (row == norm.sr) norm.sc else 0;
+        const end_col: u16 = if (row == norm.er) @min(norm.ec, sc.cols - 1) else sc.cols - 1;
+        // Trim trailing default-' ' cells.
+        var last_meaningful: i32 = @as(i32, start_col) - 1;
+        var c: u16 = start_col;
+        while (c <= end_col) : (c += 1) {
+            const cell = sc.cells[@as(usize, row) * sc.cols + c];
+            if (cell.ch != ' ') last_meaningful = @intCast(c);
+        }
+        if (last_meaningful >= @as(i32, start_col)) {
+            const stop: u16 = @intCast(last_meaningful);
+            var cc: u16 = start_col;
+            while (cc <= stop) : (cc += 1) {
+                const cell = sc.cells[@as(usize, row) * sc.cols + cc];
+                out += encodeUtf8(cell.ch, buf[out..]);
+                if (out >= buf.len - 4) return out;
+            }
+        }
+        if (row < norm.er) {
+            if (out >= buf.len) return out;
+            buf[out] = '\n';
+            out += 1;
+        }
+    }
+    return out;
+}
+
+fn encodeUtf8(cp: u21, out: []u8) usize {
+    if (out.len == 0) return 0;
+    if (cp < 0x80) {
+        out[0] = @intCast(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        if (out.len < 2) return 0;
+        out[0] = @intCast(0xC0 | (cp >> 6));
+        out[1] = @intCast(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        if (out.len < 3) return 0;
+        out[0] = @intCast(0xE0 | (cp >> 12));
+        out[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = @intCast(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    if (out.len < 4) return 0;
+    out[0] = @intCast(0xF0 | (cp >> 18));
+    out[1] = @intCast(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = @intCast(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+fn pasteFromClipboard(state: *State) void {
+    const t = state.focusedTerminal() orelse return;
+    const NSPasteboard = objc.cls("NSPasteboard");
+    const general = objc.send(objc.id, NSPasteboard, objc.sel("generalPasteboard"));
+    const ns_str = objc.send1(objc.id, general, objc.sel("stringForType:"), objc.NSPasteboardTypeString);
+    if (ns_str == null) return;
+    const utf8: ?[*:0]const u8 = objc.send(?[*:0]const u8, ns_str, objc.sel("UTF8String"));
+    if (utf8) |p| {
+        const slice = std.mem.span(p);
+        if (t.bracketed_paste) {
+            t.write("\x1b[200~") catch {};
+            t.write(slice) catch {};
+            t.write("\x1b[201~") catch {};
+        } else {
+            t.write(slice) catch {};
+        }
+    }
+}
+
+fn selectAll(state: *State) void {
+    const t = state.focusedTerminal() orelse return;
+    const sc = t.currentScreen();
+    const cur_tab = state.currentTab();
+    state.selection = .{
+        .pane_id = cur_tab.active,
+        .anchor_col = 0,
+        .anchor_row = 0,
+        .end_col = if (sc.cols > 0) sc.cols - 1 else 0,
+        .end_row = if (sc.rows > 0) sc.rows - 1 else 0,
+        .dragging = false,
+    };
+}
+
+fn copyToClipboard(text: []const u8) void {
+    const NSPasteboard = objc.cls("NSPasteboard");
+    const general = objc.send(objc.id, NSPasteboard, objc.sel("generalPasteboard"));
+    _ = objc.send(c_long, general, objc.sel("clearContents"));
+    // Make a NUL-terminated buffer for stringWithUTF8String:.
+    var buf: [16 * 1024]u8 = undefined;
+    const n = @min(text.len, buf.len - 1);
+    std.mem.copyForwards(u8, buf[0..n], text[0..n]);
+    buf[n] = 0;
+    const ns_str = objc.send1(
+        objc.id,
+        objc.cls("NSString"),
+        objc.sel("stringWithUTF8String:"),
+        @as([*:0]const u8, @ptrCast(&buf[0])),
+    );
+    _ = objc.send2(objc.BOOL, general, objc.sel("setString:forType:"), ns_str, objc.NSPasteboardTypeString);
 }
 
 fn rectContains(r: st.Rect, p: objc.NSPoint) bool {

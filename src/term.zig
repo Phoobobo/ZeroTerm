@@ -28,7 +28,7 @@ pub const Terminal = struct {
     primary: screen.Screen,
     alt: screen.Screen,
     use_alt: bool = false,
-    bell_pending: bool = false,
+    bell_until_ms: i64 = 0,
     bracketed_paste: bool = false,
     source: ?objc.id = null,
     title_buf: [256]u8 = undefined,
@@ -90,6 +90,10 @@ pub const Terminal = struct {
     }
 };
 
+fn triggerDirty(_: ?*anyopaque) callconv(.c) void {
+    if (g_dirty) |cb| cb();
+}
+
 fn onReadable(ctx: ?*anyopaque) callconv(.c) void {
     const term: *Terminal = @ptrCast(@alignCast(ctx orelse return));
     var buf: [4096]u8 = undefined;
@@ -113,7 +117,12 @@ const Sink = struct {
     pub fn execute(self: Sink, b: u8) void {
         const s = self.term.currentScreen();
         switch (b) {
-            0x07 => self.term.bell_pending = true,
+            0x07 => {
+                self.term.bell_until_ms = objc.nowMs() + 180;
+                const queue = objc.dispatch_get_main_queue();
+                const when = objc.dispatch_time(objc.DISPATCH_TIME_NOW, 200 * 1_000_000);
+                objc.dispatch_after_f(when, queue, null, &triggerDirty);
+            },
             0x08 => s.backspace(),
             0x09 => s.tab(),
             0x0A, 0x0B, 0x0C => s.linefeed(),

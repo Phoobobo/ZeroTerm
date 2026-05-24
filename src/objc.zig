@@ -33,6 +33,8 @@ pub extern "objc" fn class_addMethod(cls_: Class, name: SEL, imp: IMP, types: [*
 // AppKit attributed-string key globals — `extern NSString * const ...`.
 pub extern const NSFontAttributeName: id;
 pub extern const NSForegroundColorAttributeName: id;
+// NSPasteboard type UTI. Defined as `extern NSPasteboardType const ...` on macOS.
+pub extern const NSPasteboardTypeString: id;
 
 // Grand Central Dispatch — runloop scheduling + fd event sources.
 // `dispatch_get_main_queue` and `DISPATCH_SOURCE_TYPE_READ` are macros in C
@@ -60,6 +62,13 @@ pub const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 // libc env access — used by the screenshot harness.
 pub extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+// mach_absolute_time returns ns on arm64-darwin (timebase is 1:1). Used for
+// short-interval comparisons like the visual bell flash window.
+pub extern fn mach_absolute_time() u64;
+pub inline fn nowMs() i64 {
+    return @as(i64, @intCast(mach_absolute_time() / 1_000_000));
+}
 
 // Core Graphics — drawing primitives. Linked via CoreGraphics framework.
 pub extern fn CGContextSetRGBFillColor(c: CGContextRef, r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat) void;

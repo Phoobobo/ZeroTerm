@@ -48,6 +48,15 @@ pub const Rect = struct { x: f64, y: f64, w: f64, h: f64 };
 pub const TabHit = struct { idx: usize, rect: Rect };
 pub const PaneHit = struct { id: PaneId, rect: Rect };
 
+pub const Selection = struct {
+    pane_id: PaneId,
+    anchor_col: u16,
+    anchor_row: u16,
+    end_col: u16,
+    end_row: u16,
+    dragging: bool,
+};
+
 pub const Spawner = *const fn (allocator: std.mem.Allocator) anyerror!*term.Terminal;
 
 pub const State = struct {
@@ -56,6 +65,7 @@ pub const State = struct {
     tabs: std.ArrayList(*Tab),
     active_tab: usize,
     next_id: PaneId,
+    selection: ?Selection = null,
 
     // Hit-box caches populated by the draw pass and consumed by mouseDown.
     tab_hits: std.ArrayList(TabHit),
@@ -281,6 +291,11 @@ pub const State = struct {
         return findTerminal(tab.root, tab.active);
     }
 
+    pub fn terminalOf(self: *State, id: PaneId) ?*term.Terminal {
+        const tab = self.currentTab();
+        return findTerminal(tab.root, id);
+    }
+
     fn findTerminal(p: *Pane, id: PaneId) ?*term.Terminal {
         return switch (p.*) {
             .leaf => |l| if (l.id == id) l.terminal else null,
@@ -288,6 +303,17 @@ pub const State = struct {
         };
     }
 };
+
+/// Normalised selection rectangle in (col, row) cell coordinates with row 0 at
+/// the top of the screen. start <= end in row-major order.
+pub fn normalizedSelection(sel: Selection) struct { sc: u16, sr: u16, ec: u16, er: u16 } {
+    const before = (sel.anchor_row < sel.end_row) or
+        (sel.anchor_row == sel.end_row and sel.anchor_col <= sel.end_col);
+    return if (before)
+        .{ .sc = sel.anchor_col, .sr = sel.anchor_row, .ec = sel.end_col, .er = sel.end_row }
+    else
+        .{ .sc = sel.end_col, .sr = sel.end_row, .ec = sel.anchor_col, .er = sel.anchor_row };
+}
 
 test "newTab and selectTab" {
     var s = try State.init(std.testing.allocator, null);

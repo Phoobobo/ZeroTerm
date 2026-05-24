@@ -1,13 +1,16 @@
-//! AppKit entry point. Creates the window, the global UI state with a shell
-//! spawner, the custom NSView subclass, and hands control to the AppKit run
-//! loop.
+//! AppKit entry point. Creates the first window, registers the shell spawner,
+//! and hands control to the AppKit run loop. Additional windows are spawned
+//! via Cmd-N — see `createWindow`.
 
 const std = @import("std");
 const objc = @import("objc.zig");
 const view = @import("ui/view.zig");
 const font = @import("ui/font.zig");
+const draw = @import("ui/draw.zig");
+const wm = @import("ui/windows.zig");
 const term = @import("term.zig");
-const State = @import("ui/state.zig").State;
+const state_mod = @import("ui/state.zig");
+const State = state_mod.State;
 
 const NSWindowStyleMaskTitled: c_ulong = 1 << 0;
 const NSWindowStyleMaskClosable: c_ulong = 1 << 1;
@@ -18,14 +21,12 @@ const NSApplicationActivationPolicyRegular: c_long = 0;
 const NSViewWidthSizable: c_ulong = 1 << 1;
 const NSViewHeightSizable: c_ulong = 1 << 4;
 
-var g_state: State = undefined;
-var g_window: objc.id = null;
-var g_view: objc.id = null;
 var g_screenshot_path: ?[*:0]const u8 = null;
 var g_shell_buf: [256]u8 = undefined;
 var g_shell_z: [:0]u8 = undefined;
 var g_initial_cols: u16 = 80;
 var g_initial_rows: u16 = 24;
+var g_view_class: objc.Class = null;
 
 const window_w: f64 = 960;
 const window_h: f64 = 600;
@@ -33,6 +34,7 @@ const tab_bar_h: f64 = 28;
 
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
+    wm.init(allocator);
 
     // Font metrics must come before any Terminal is created — initial cols/rows
     // are derived from them so the bootstrap shell starts at the right width
@@ -41,63 +43,22 @@ pub fn run() !void {
     g_initial_cols = @intCast(@max(20, @as(i64, @intFromFloat(@floor(window_w / font.metrics.cell_w)))));
     g_initial_rows = @intCast(@max(5, @as(i64, @intFromFloat(@floor((window_h - tab_bar_h) / font.metrics.cell_h)))));
 
-    // Resolve $SHELL into a NUL-terminated buffer we'll point the spawner at.
     g_shell_z = try resolveShell(&g_shell_buf);
-
-    g_state = try State.init(allocator, &spawnTerminal);
-    view.install(&g_state);
-
-    // Start the pump on every leaf in the initial state.
-    startPumpsRecursive(g_state.currentTab().root);
-
-    const cls = view.registerClass();
+    view.install();
+    g_view_class = view.registerClass();
+    wm.new_window_fn = &createWindow;
 
     const NSApplication = objc.cls("NSApplication");
-    const NSWindow = objc.cls("NSWindow");
-    const NSString = objc.cls("NSString");
-
     const shared = objc.send(objc.id, NSApplication, objc.sel("sharedApplication"));
     _ = objc.send1(objc.BOOL, shared, objc.sel("setActivationPolicy:"), NSApplicationActivationPolicyRegular);
 
-    const frame = objc.NSRect{
-        .origin = .{ .x = 200, .y = 200 },
-        .size = .{ .w = 960, .h = 600 },
-    };
-    const style: c_ulong = NSWindowStyleMaskTitled |
-        NSWindowStyleMaskClosable |
-        NSWindowStyleMaskMiniaturizable |
-        NSWindowStyleMaskResizable;
+    // First window.
+    _ = try createWindowImpl(allocator);
 
-    const window_alloc = objc.send(objc.id, NSWindow, objc.sel("alloc"));
-    const window = objc.send4(
-        objc.id,
-        window_alloc,
-        objc.sel("initWithContentRect:styleMask:backing:defer:"),
-        frame,
-        style,
-        NSBackingStoreBuffered,
-        @as(objc.BOOL, 0),
-    );
-
-    const title = objc.send1(
-        objc.id,
-        NSString,
-        objc.sel("stringWithUTF8String:"),
-        @as([*:0]const u8, "ZeroTerm"),
-    );
-    _ = objc.send1(void, window, objc.sel("setTitle:"), title);
-
-    const content = view.alloc(cls);
-    _ = objc.send1(void, content, objc.sel("setAutoresizingMask:"), NSViewWidthSizable | NSViewHeightSizable);
-    _ = objc.send1(void, window, objc.sel("setContentView:"), content);
-    _ = objc.send1(objc.BOOL, window, objc.sel("makeFirstResponder:"), content);
-
-    g_window = window;
-    g_view = content;
-    view.setView(content);
-
-    _ = objc.send1(void, window, objc.sel("makeKeyAndOrderFront:"), @as(objc.id, null));
     _ = objc.send1(void, shared, objc.sel("activateIgnoringOtherApps:"), @as(objc.BOOL, 1));
+
+    // Pick the palette from the current macOS appearance.
+    draw.refreshAppearance();
 
     scheduleHarness();
 
@@ -124,49 +85,106 @@ fn spawnTerminal(allocator: std.mem.Allocator) anyerror!*term.Terminal {
     return t;
 }
 
-const Pane = @import("ui/state.zig").Pane;
-fn startPumpsRecursive(p: *Pane) void {
-    switch (p.*) {
-        .leaf => {},
-        .split => |s| {
-            startPumpsRecursive(s.a);
-            startPumpsRecursive(s.b);
-        },
-    }
+/// Cmd-N invokes this through `windows.new_window_fn`. Wraps the heap-aware
+/// path so we don't bubble errors back to the IMP callback.
+fn createWindow() void {
+    _ = createWindowImpl(wm.allocator()) catch {};
+}
+
+fn createWindowImpl(allocator: std.mem.Allocator) !*wm.WindowCtx {
+    const ctx = try allocator.create(wm.WindowCtx);
+    ctx.* = .{
+        .state = try State.init(allocator, &spawnTerminal),
+        .window = null,
+        .view = null,
+    };
+
+    const NSWindow = objc.cls("NSWindow");
+    const NSString = objc.cls("NSString");
+
+    // Cascade subsequent windows down-right of the first.
+    const offset = @as(f64, @floatFromInt(wm.contexts.items.len)) * 24.0;
+    const frame = objc.NSRect{
+        .origin = .{ .x = 200 + offset, .y = 200 - offset },
+        .size = .{ .w = window_w, .h = window_h },
+    };
+    const style: c_ulong = NSWindowStyleMaskTitled |
+        NSWindowStyleMaskClosable |
+        NSWindowStyleMaskMiniaturizable |
+        NSWindowStyleMaskResizable;
+
+    const window_alloc = objc.send(objc.id, NSWindow, objc.sel("alloc"));
+    const window = objc.send4(
+        objc.id,
+        window_alloc,
+        objc.sel("initWithContentRect:styleMask:backing:defer:"),
+        frame,
+        style,
+        NSBackingStoreBuffered,
+        @as(objc.BOOL, 0),
+    );
+    const title = objc.send1(
+        objc.id,
+        NSString,
+        objc.sel("stringWithUTF8String:"),
+        @as([*:0]const u8, "ZeroTerm"),
+    );
+    _ = objc.send1(void, window, objc.sel("setTitle:"), title);
+
+    const content = view.alloc(g_view_class);
+    _ = objc.send1(void, content, objc.sel("setAutoresizingMask:"), NSViewWidthSizable | NSViewHeightSizable);
+    _ = objc.send1(void, window, objc.sel("setContentView:"), content);
+    _ = objc.send1(objc.BOOL, window, objc.sel("makeFirstResponder:"), content);
+
+    ctx.window = window;
+    ctx.view = content;
+    wm.add(ctx);
+
+    _ = objc.send1(void, window, objc.sel("makeKeyAndOrderFront:"), @as(objc.id, null));
+    return ctx;
 }
 
 /// Schedule a sequence of test events controlled by env vars.
-///   ZT_PRESPLIT=v       — split active pane side-by-side before snapshotting
-///   ZT_PRESPLIT=h       — split active pane top-bottom
-///   ZT_PRESPLIT=v,h     — chain multiple splits in sequence
+///   ZT_PRESPLIT=v       — split active pane side-by-side
+///   ZT_PRESPLIT=v,h     — chain splits
 ///   ZT_PRENEWTAB=n      — open N additional tabs
+///   ZT_PRENEWWIN=n      — open N additional windows
 ///   ZT_INPUT="text"     — write `text` (with \n interpreted) to focused pane
-///   ZT_SCREENSHOT=path  — capture the view to a PNG at exit
+///   ZT_SCREENSHOT=path  — capture the first window to a PNG at exit
 ///   ZT_SCREENSHOT_DELAY_MS=ms — when to take the screenshot (default 1500)
 fn scheduleHarness() void {
     const queue = objc.dispatch_get_main_queue();
+
+    if (objc.getenv("ZT_PRENEWWIN")) |p| {
+        const s = std.mem.span(p);
+        const n = std.fmt.parseInt(usize, s, 10) catch 0;
+        var i: usize = 0;
+        while (i < n) : (i += 1) createWindow();
+    }
+
+    if (wm.contexts.items.len == 0) return;
+    const state = &wm.contexts.items[0].state;
 
     if (objc.getenv("ZT_PRENEWTAB")) |p| {
         const s = std.mem.span(p);
         const n = std.fmt.parseInt(usize, s, 10) catch 0;
         var i: usize = 0;
-        while (i < n) : (i += 1) g_state.newTab() catch {};
-        g_state.selectTab(0);
+        while (i < n) : (i += 1) state.newTab() catch {};
+        state.selectTab(0);
     }
 
     if (objc.getenv("ZT_PRESPLIT")) |p| {
         const s = std.mem.span(p);
         var it = std.mem.splitScalar(u8, s, ',');
         while (it.next()) |chunk| {
-            const kind: @import("ui/state.zig").SplitKind = if (chunk.len > 0 and chunk[0] == 'h') .top_bottom else .side_by_side;
-            g_state.splitActive(kind) catch {};
+            const kind: state_mod.SplitKind = if (chunk.len > 0 and chunk[0] == 'h') .top_bottom else .side_by_side;
+            state.splitActive(kind) catch {};
         }
     }
 
     if (objc.getenv("ZT_INPUT")) |p| {
         const inp = std.mem.span(p);
-        const buf = injectInputAlloc(inp);
-        g_inject_text = buf;
+        g_inject_text = injectInputAlloc(inp);
         const when = objc.dispatch_time(objc.DISPATCH_TIME_NOW, 700 * 1_000_000);
         objc.dispatch_after_f(when, queue, null, &injectInput);
     }
@@ -186,7 +204,6 @@ var g_inject_text: []const u8 = "";
 var g_inject_buf: [4096]u8 = undefined;
 
 fn injectInputAlloc(input: []const u8) []const u8 {
-    // Interpret common escapes (\n, \t, \r, \\).
     var i: usize = 0;
     var out: usize = 0;
     while (i < input.len and out < g_inject_buf.len) : (i += 1) {
@@ -214,13 +231,15 @@ fn injectInputAlloc(input: []const u8) []const u8 {
 }
 
 fn injectInput(_: ?*anyopaque) callconv(.c) void {
-    const t = g_state.focusedTerminal() orelse return;
+    if (wm.contexts.items.len == 0) return;
+    const t = wm.contexts.items[0].state.focusedTerminal() orelse return;
     t.write(g_inject_text) catch {};
 }
 
 fn captureAndExit(_: ?*anyopaque) callconv(.c) void {
-    const path_c = g_screenshot_path orelse return;
-    const view_obj = g_view;
+    if (wm.contexts.items.len == 0) return terminate();
+    const path_c = g_screenshot_path orelse return terminate();
+    const view_obj = wm.contexts.items[0].view;
     const bounds = objc.send(objc.NSRect, view_obj, objc.sel("bounds"));
     const rep = objc.send1(objc.id, view_obj, objc.sel("bitmapImageRepForCachingDisplayInRect:"), bounds);
     _ = objc.send2(void, view_obj, objc.sel("cacheDisplayInRect:toBitmapImageRep:"), bounds, rep);
@@ -228,6 +247,10 @@ fn captureAndExit(_: ?*anyopaque) callconv(.c) void {
     const data = objc.send2(objc.id, rep, objc.sel("representationUsingType:properties:"), @as(u64, 4), @as(objc.id, null));
     const ns_path = objc.send1(objc.id, objc.cls("NSString"), objc.sel("stringWithUTF8String:"), path_c);
     _ = objc.send2(objc.BOOL, data, objc.sel("writeToFile:atomically:"), ns_path, @as(objc.BOOL, 1));
+    terminate();
+}
+
+fn terminate() void {
     const NSApplication = objc.cls("NSApplication");
     const shared = objc.send(objc.id, NSApplication, objc.sel("sharedApplication"));
     _ = objc.send1(void, shared, objc.sel("terminate:"), @as(objc.id, null));
