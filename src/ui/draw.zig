@@ -216,13 +216,31 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
     }
 
     const sc = t.currentScreen();
+    const view_offset = sc.view_offset;
+    const sb_len: i64 = @intCast(sc.scrollback.items.len);
+
+    // Helper: fetch the cell at display row r, col c, honouring scrollback view.
+    const cellAt = struct {
+        fn get(scr: *const screen_mod.Screen, sb: i64, vo: u32, r: u16, c: u16) screen_mod.Cell {
+            const virtual_idx: i64 = sb + @as(i64, r) - @as(i64, vo);
+            if (virtual_idx < sb) {
+                if (virtual_idx < 0) return .{};
+                const row_data = scr.scrollback.items[@as(usize, @intCast(virtual_idx))];
+                if (c < row_data.cells.len) return row_data.cells[c];
+                return .{};
+            }
+            const live_r: usize = @intCast(virtual_idx - sb);
+            if (live_r >= scr.rows) return .{};
+            return scr.cells[live_r * scr.cols + c];
+        }
+    }.get;
 
     // Background pass.
     var row: u16 = 0;
     while (row < sc.rows) : (row += 1) {
         var col: u16 = 0;
         while (col < sc.cols) : (col += 1) {
-            const cell = sc.cells[@as(usize, row) * sc.cols + col];
+            const cell = cellAt(sc, sb_len, view_offset, row, col);
             const draw_bg = if (cell.attrs.reverse) cell.fg else cell.bg;
             if (draw_bg != .default) {
                 const rgb = colorRgb(draw_bg);
@@ -244,11 +262,11 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
         var col: u16 = 0;
         while (col < sc.cols) {
             const start = col;
-            const c0 = sc.cells[@as(usize, rrow) * sc.cols + start];
+            const c0 = cellAt(sc, sb_len, view_offset, rrow, start);
             var text_len: usize = 0;
             // Build run.
             while (col < sc.cols) : (col += 1) {
-                const cn = sc.cells[@as(usize, rrow) * sc.cols + col];
+                const cn = cellAt(sc, sb_len, view_offset, rrow, col);
                 if (!sameStyle(c0, cn)) break;
                 if (text_len + 4 > text_buf.len) break;
                 text_len += encodeUtf8(cn.ch, text_buf[text_len..]);
@@ -257,7 +275,7 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
             const all_blank = blk: {
                 var i: u16 = start;
                 while (i < col) : (i += 1) {
-                    const cc = sc.cells[@as(usize, rrow) * sc.cols + i];
+                    const cc = cellAt(sc, sb_len, view_offset, rrow, i);
                     if (cc.ch != ' ' or cc.attrs.underline) break :blk false;
                 }
                 break :blk true;
@@ -301,8 +319,8 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
         });
     }
 
-    // Cursor.
-    if (focused and sc.cursor_visible and sc.cursor_row < sc.rows and sc.cursor_col < sc.cols) {
+    // Cursor — only when viewing the live screen.
+    if (focused and view_offset == 0 and sc.cursor_visible and sc.cursor_row < sc.rows and sc.cursor_col < sc.cols) {
         const x0 = rect.x + @as(f64, @floatFromInt(sc.cursor_col)) * cell_w;
         const y0 = rect.y + rect.h - @as(f64, @floatFromInt(sc.cursor_row + 1)) * cell_h;
         setFill(ctx, palette.cursor);

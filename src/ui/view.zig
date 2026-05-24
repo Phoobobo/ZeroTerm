@@ -260,9 +260,31 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
         return false;
     }
 
+    // Shift-PageUp/PageDown and Shift-Up/Down navigate scrollback.
+    if (shift) switch (first_ch) {
+        NSPageUpFunctionKey => {
+            if (state.focusedTerminal()) |t_| t_.currentScreen().scrollViewBy(@as(i32, @intCast(t_.currentScreen().rows)));
+            return true;
+        },
+        NSPageDownFunctionKey => {
+            if (state.focusedTerminal()) |t_| t_.currentScreen().scrollViewBy(-@as(i32, @intCast(t_.currentScreen().rows)));
+            return true;
+        },
+        NSUpArrowFunctionKey => {
+            if (state.focusedTerminal()) |t_| t_.currentScreen().scrollViewBy(1);
+            return true;
+        },
+        NSDownArrowFunctionKey => {
+            if (state.focusedTerminal()) |t_| t_.currentScreen().scrollViewBy(-1);
+            return true;
+        },
+        else => {},
+    };
+
     // Non-shortcut: route to the focused terminal as input bytes.
     state.selection = null;
     const t = state.focusedTerminal() orelse return false;
+    t.currentScreen().snapToLive();
     var seq_buf: [16]u8 = undefined;
     const out = translateKey(first_ch, mods, &seq_buf) orelse {
         // Fall back to whatever AppKit produced in `characters` (respects shift,

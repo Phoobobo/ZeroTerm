@@ -25,6 +25,12 @@ pub const Cell = struct {
     attrs: Attrs = .{},
 };
 
+pub const Row = struct {
+    cells: []Cell,
+};
+
+pub const max_scrollback: usize = 5000;
+
 pub const Screen = struct {
     allocator: std.mem.Allocator,
     cols: u16,
@@ -42,6 +48,8 @@ pub const Screen = struct {
     wrap: bool = true,
     cursor_visible: bool = true,
     pending_wrap: bool = false,
+    scrollback: std.ArrayList(Row) = .empty,
+    view_offset: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, cols: u16, rows: u16) !Screen {
         const cells = try allocator.alloc(Cell, @as(usize, cols) * rows);
@@ -57,7 +65,35 @@ pub const Screen = struct {
     }
 
     pub fn deinit(self: *Screen) void {
+        for (self.scrollback.items) |row| self.allocator.free(row.cells);
+        self.scrollback.deinit(self.allocator);
         self.allocator.free(self.cells);
+    }
+
+    fn pushToScrollback(self: *Screen, row_idx: u16) !void {
+        const off = @as(usize, row_idx) * self.cols;
+        const copy = try self.allocator.dupe(Cell, self.cells[off .. off + self.cols]);
+        try self.scrollback.append(self.allocator, .{ .cells = copy });
+        if (self.scrollback.items.len > max_scrollback) {
+            const drop = self.scrollback.items.len - max_scrollback;
+            var i: usize = 0;
+            while (i < drop) : (i += 1) {
+                const dropped = self.scrollback.orderedRemove(0);
+                self.allocator.free(dropped.cells);
+            }
+        }
+    }
+
+    pub fn scrollViewBy(self: *Screen, delta: i32) void {
+        var next: i32 = @as(i32, @intCast(self.view_offset)) + delta;
+        if (next < 0) next = 0;
+        const cap: i32 = @intCast(self.scrollback.items.len);
+        if (next > cap) next = cap;
+        self.view_offset = @intCast(next);
+    }
+
+    pub fn snapToLive(self: *Screen) void {
+        self.view_offset = 0;
     }
 
     pub fn resize(self: *Screen, cols: u16, rows: u16) !void {
@@ -152,6 +188,13 @@ pub const Screen = struct {
         const region_rows = bot + 1 - top;
         const shift = @min(n, region_rows);
         const row_len: usize = self.cols;
+        // Lines pushed off the top of a full-screen region get archived to
+        // scrollback. Partial-region scrolls (curses apps that maintain their
+        // own subregion) don't pollute history.
+        if (top == 0 and bot + 1 == self.rows) {
+            var i: u16 = 0;
+            while (i < shift) : (i += 1) self.pushToScrollback(i) catch {};
+        }
         var r = top;
         while (r + shift <= bot) : (r += 1) {
             const dst = @as(usize, r) * row_len;
