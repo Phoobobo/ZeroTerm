@@ -1,0 +1,13 @@
+.{
+    .name = .zeroterm,
+    .version = "0.0.0",
+    .fingerprint = 0x58ff45b4a22727a7,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "CLAUDE.md",
+    },
+}
