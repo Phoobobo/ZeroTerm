@@ -25,7 +25,11 @@ pub const Terminal = struct {
     allocator: std.mem.Allocator,
     pty: Pty,
     parser: parser.Parser,
-    screen: screen.Screen,
+    primary: screen.Screen,
+    alt: screen.Screen,
+    use_alt: bool = false,
+    bell_pending: bool = false,
+    bracketed_paste: bool = false,
     source: ?objc.id = null,
     title_buf: [256]u8 = undefined,
     title_len: u16 = 0,
@@ -41,21 +45,28 @@ pub const Terminal = struct {
             .allocator = allocator,
             .pty = try Pty.spawn(shell, cols, rows),
             .parser = .{},
-            .screen = try screen.Screen.init(allocator, cols, rows),
+            .primary = try screen.Screen.init(allocator, cols, rows),
+            .alt = try screen.Screen.init(allocator, cols, rows),
         };
         return self;
     }
 
     pub fn destroy(self: *Terminal) void {
         if (self.source) |s| objc.dispatch_source_cancel(s);
-        self.screen.deinit();
+        self.primary.deinit();
+        self.alt.deinit();
         self.pty.close();
         self.allocator.destroy(self);
     }
 
+    pub fn currentScreen(self: *Terminal) *screen.Screen {
+        return if (self.use_alt) &self.alt else &self.primary;
+    }
+
     pub fn resize(self: *Terminal, cols: u16, rows: u16) !void {
         if (cols == 0 or rows == 0) return;
-        try self.screen.resize(cols, rows);
+        try self.primary.resize(cols, rows);
+        try self.alt.resize(cols, rows);
         try self.pty.resize(cols, rows);
     }
 
@@ -96,44 +107,46 @@ const Sink = struct {
     term: *Terminal,
 
     pub fn print(self: Sink, cp: u21) void {
-        self.term.screen.put(cp);
+        self.term.currentScreen().put(cp);
     }
 
     pub fn execute(self: Sink, b: u8) void {
+        const s = self.term.currentScreen();
         switch (b) {
-            0x07 => {}, // BEL — visual bell will hook here later
-            0x08 => self.term.screen.backspace(),
-            0x09 => self.term.screen.tab(),
-            0x0A, 0x0B, 0x0C => self.term.screen.linefeed(),
-            0x0D => self.term.screen.carriageReturn(),
+            0x07 => self.term.bell_pending = true,
+            0x08 => s.backspace(),
+            0x09 => s.tab(),
+            0x0A, 0x0B, 0x0C => s.linefeed(),
+            0x0D => s.carriageReturn(),
             else => {},
         }
     }
 
     pub fn esc(self: Sink, b: u8) void {
+        const s = self.term.currentScreen();
         switch (b) {
-            '7' => self.term.screen.saveCursor(),
-            '8' => self.term.screen.restoreCursor(),
-            'D' => self.term.screen.linefeed(),
+            '7' => s.saveCursor(),
+            '8' => s.restoreCursor(),
+            'D' => s.linefeed(),
             'E' => {
-                self.term.screen.linefeed();
-                self.term.screen.carriageReturn();
+                s.linefeed();
+                s.carriageReturn();
             },
-            'M' => self.term.screen.scrollDown(1),
+            'M' => s.scrollDown(1),
             'c' => {
-                self.term.screen.cur_fg = .default;
-                self.term.screen.cur_bg = .default;
-                self.term.screen.cur_attrs = .{};
-                self.term.screen.cursor_col = 0;
-                self.term.screen.cursor_row = 0;
-                for (self.term.screen.cells) |*c| c.* = .{};
+                s.cur_fg = .default;
+                s.cur_bg = .default;
+                s.cur_attrs = .{};
+                s.cursor_col = 0;
+                s.cursor_row = 0;
+                for (s.cells) |*c| c.* = .{};
             },
             else => {},
         }
     }
 
     pub fn csi(self: Sink, cmd: parser.CsiCmd) void {
-        const s = &self.term.screen;
+        const s = self.term.currentScreen();
         const params = cmd.params;
         switch (cmd.final) {
             'A' => s.moveRel(0, -csiArg(params, 0, 1)),
@@ -165,22 +178,57 @@ const Sink = struct {
                 s.scroll_bot = bot;
                 s.moveTo(0, 0);
             },
-            'h', 'l' => {
-                // DEC private modes — most are mode toggles; common ones:
-                if (cmd.prefix == '?') {
-                    for (params) |p| switch (p) {
-                        25 => s.cursor_visible = (cmd.final == 'h'),
+            'h', 'l' => self.handleMode(cmd),
+            'n' => {
+                // DSR — device status report. Common: 5 (status) → ESC[0n; 6 (cursor) → ESC[r;cR.
+                if (cmd.prefix == 0 and params.len > 0) {
+                    switch (params[0]) {
+                        5 => self.term.write("\x1b[0n") catch {},
+                        6 => {
+                            var rbuf: [32]u8 = undefined;
+                            const reply = std.fmt.bufPrint(&rbuf, "\x1b[{d};{d}R", .{ s.cursor_row + 1, s.cursor_col + 1 }) catch return;
+                            self.term.write(reply) catch {};
+                        },
                         else => {},
-                    };
+                    }
                 }
             },
-            'n' => {}, // device status report — TODO: reply via PTY write
             else => {},
         }
     }
 
+    fn handleMode(self: Sink, cmd: parser.CsiCmd) void {
+        if (cmd.prefix != '?') return;
+        const enable = cmd.final == 'h';
+        for (cmd.params) |p| switch (p) {
+            7 => self.term.currentScreen().wrap = enable,
+            25 => self.term.currentScreen().cursor_visible = enable,
+            1049, 1047 => {
+                // Switch to/from the alternate screen buffer (with cursor save).
+                if (enable and !self.term.use_alt) {
+                    self.term.primary.saveCursor();
+                    self.term.use_alt = true;
+                    // Clear alt before showing.
+                    for (self.term.alt.cells) |*c| c.* = .{};
+                    self.term.alt.cursor_col = 0;
+                    self.term.alt.cursor_row = 0;
+                    self.term.alt.cur_fg = .default;
+                    self.term.alt.cur_bg = .default;
+                    self.term.alt.cur_attrs = .{};
+                } else if (!enable and self.term.use_alt) {
+                    self.term.use_alt = false;
+                    self.term.primary.restoreCursor();
+                }
+            },
+            1048 => {
+                if (enable) self.term.currentScreen().saveCursor() else self.term.currentScreen().restoreCursor();
+            },
+            2004 => self.term.bracketed_paste = enable,
+            else => {},
+        };
+    }
+
     pub fn osc(self: Sink, data: []const u8) void {
-        // OSC 0;title  or  OSC 2;title
         if (data.len < 3) return;
         const semi = std.mem.indexOfScalar(u8, data, ';') orelse return;
         const code = data[0..semi];

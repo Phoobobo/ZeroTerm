@@ -24,14 +24,22 @@ var g_view: objc.id = null;
 var g_screenshot_path: ?[*:0]const u8 = null;
 var g_shell_buf: [256]u8 = undefined;
 var g_shell_z: [:0]u8 = undefined;
+var g_initial_cols: u16 = 80;
+var g_initial_rows: u16 = 24;
+
+const window_w: f64 = 960;
+const window_h: f64 = 600;
+const tab_bar_h: f64 = 28;
 
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
 
     // Font metrics must come before any Terminal is created — initial cols/rows
-    // are derived from a default in State but rendering uses these metrics
-    // immediately on first paint.
+    // are derived from them so the bootstrap shell starts at the right width
+    // and doesn't render a misfitting prompt before the first SIGWINCH.
     font.init(13.0);
+    g_initial_cols = @intCast(@max(20, @as(i64, @intFromFloat(@floor(window_w / font.metrics.cell_w)))));
+    g_initial_rows = @intCast(@max(5, @as(i64, @intFromFloat(@floor((window_h - tab_bar_h) / font.metrics.cell_h)))));
 
     // Resolve $SHELL into a NUL-terminated buffer we'll point the spawner at.
     g_shell_z = try resolveShell(&g_shell_buf);
@@ -91,16 +99,7 @@ pub fn run() !void {
     _ = objc.send1(void, window, objc.sel("makeKeyAndOrderFront:"), @as(objc.id, null));
     _ = objc.send1(void, shared, objc.sel("activateIgnoringOtherApps:"), @as(objc.BOOL, 1));
 
-    if (objc.getenv("ZT_SCREENSHOT")) |path| {
-        g_screenshot_path = path;
-        // Give the shell time to draw its first prompt before snapshotting.
-        const delay_ms: i64 = if (objc.getenv("ZT_SCREENSHOT_DELAY_MS")) |p| blk: {
-            const s = std.mem.span(p);
-            break :blk std.fmt.parseInt(i64, s, 10) catch 1500;
-        } else 1500;
-        const when = objc.dispatch_time(objc.DISPATCH_TIME_NOW, delay_ms * 1_000_000);
-        objc.dispatch_after_f(when, objc.dispatch_get_main_queue(), null, &captureAndExit);
-    }
+    scheduleHarness();
 
     _ = objc.send(void, shared, objc.sel("run"));
 }
@@ -120,7 +119,7 @@ fn resolveShell(buf: *[256]u8) ![:0]u8 {
 }
 
 fn spawnTerminal(allocator: std.mem.Allocator) anyerror!*term.Terminal {
-    const t = try term.Terminal.create(allocator, g_shell_z.ptr, 80, 24);
+    const t = try term.Terminal.create(allocator, g_shell_z.ptr, g_initial_cols, g_initial_rows);
     t.startPump();
     return t;
 }
@@ -134,6 +133,89 @@ fn startPumpsRecursive(p: *Pane) void {
             startPumpsRecursive(s.b);
         },
     }
+}
+
+/// Schedule a sequence of test events controlled by env vars.
+///   ZT_PRESPLIT=v       — split active pane side-by-side before snapshotting
+///   ZT_PRESPLIT=h       — split active pane top-bottom
+///   ZT_PRESPLIT=v,h     — chain multiple splits in sequence
+///   ZT_PRENEWTAB=n      — open N additional tabs
+///   ZT_INPUT="text"     — write `text` (with \n interpreted) to focused pane
+///   ZT_SCREENSHOT=path  — capture the view to a PNG at exit
+///   ZT_SCREENSHOT_DELAY_MS=ms — when to take the screenshot (default 1500)
+fn scheduleHarness() void {
+    const queue = objc.dispatch_get_main_queue();
+
+    if (objc.getenv("ZT_PRENEWTAB")) |p| {
+        const s = std.mem.span(p);
+        const n = std.fmt.parseInt(usize, s, 10) catch 0;
+        var i: usize = 0;
+        while (i < n) : (i += 1) g_state.newTab() catch {};
+        g_state.selectTab(0);
+    }
+
+    if (objc.getenv("ZT_PRESPLIT")) |p| {
+        const s = std.mem.span(p);
+        var it = std.mem.splitScalar(u8, s, ',');
+        while (it.next()) |chunk| {
+            const kind: @import("ui/state.zig").SplitKind = if (chunk.len > 0 and chunk[0] == 'h') .top_bottom else .side_by_side;
+            g_state.splitActive(kind) catch {};
+        }
+    }
+
+    if (objc.getenv("ZT_INPUT")) |p| {
+        const inp = std.mem.span(p);
+        const buf = injectInputAlloc(inp);
+        g_inject_text = buf;
+        const when = objc.dispatch_time(objc.DISPATCH_TIME_NOW, 700 * 1_000_000);
+        objc.dispatch_after_f(when, queue, null, &injectInput);
+    }
+
+    if (objc.getenv("ZT_SCREENSHOT")) |path| {
+        g_screenshot_path = path;
+        const delay_ms: i64 = if (objc.getenv("ZT_SCREENSHOT_DELAY_MS")) |dp| blk: {
+            const s = std.mem.span(dp);
+            break :blk std.fmt.parseInt(i64, s, 10) catch 1500;
+        } else 1500;
+        const when = objc.dispatch_time(objc.DISPATCH_TIME_NOW, delay_ms * 1_000_000);
+        objc.dispatch_after_f(when, queue, null, &captureAndExit);
+    }
+}
+
+var g_inject_text: []const u8 = "";
+var g_inject_buf: [4096]u8 = undefined;
+
+fn injectInputAlloc(input: []const u8) []const u8 {
+    // Interpret common escapes (\n, \t, \r, \\).
+    var i: usize = 0;
+    var out: usize = 0;
+    while (i < input.len and out < g_inject_buf.len) : (i += 1) {
+        if (input[i] == '\\' and i + 1 < input.len) {
+            const next = input[i + 1];
+            switch (next) {
+                'n' => g_inject_buf[out] = '\n',
+                't' => g_inject_buf[out] = '\t',
+                'r' => g_inject_buf[out] = '\r',
+                '\\' => g_inject_buf[out] = '\\',
+                else => {
+                    g_inject_buf[out] = input[i];
+                    out += 1;
+                    if (out < g_inject_buf.len) g_inject_buf[out] = next;
+                },
+            }
+            i += 1;
+            out += 1;
+        } else {
+            g_inject_buf[out] = input[i];
+            out += 1;
+        }
+    }
+    return g_inject_buf[0..out];
+}
+
+fn injectInput(_: ?*anyopaque) callconv(.c) void {
+    const t = g_state.focusedTerminal() orelse return;
+    t.write(g_inject_text) catch {};
 }
 
 fn captureAndExit(_: ?*anyopaque) callconv(.c) void {

@@ -139,11 +139,12 @@ fn drawTerminal(ctx: objc.CGContextRef, t: *term.Terminal, rect: Rect, focused: 
     // Resize the terminal to match the available rect.
     const want_cols: u16 = @intCast(@max(1, @as(i64, @intFromFloat(@floor(rect.w / cell_w)))));
     const want_rows: u16 = @intCast(@max(1, @as(i64, @intFromFloat(@floor(rect.h / cell_h)))));
-    if (want_cols != t.screen.cols or want_rows != t.screen.rows) {
+    const sc_check = t.currentScreen();
+    if (want_cols != sc_check.cols or want_rows != sc_check.rows) {
         t.resize(want_cols, want_rows) catch {};
     }
 
-    const sc = &t.screen;
+    const sc = t.currentScreen();
 
     // Background pass.
     var row: u16 = 0;

@@ -64,12 +64,19 @@ pub const Screen = struct {
         if (cols == self.cols and rows == self.rows) return;
         const new_cells = try self.allocator.alloc(Cell, @as(usize, cols) * rows);
         for (new_cells) |*c| c.* = .{};
-        const copy_rows = @min(rows, self.rows);
+
+        // Keep the bottom-most `min(old_rows, new_rows)` rows so the cursor /
+        // most recent output stays visible. This matches xterm behaviour: when
+        // the window shrinks, old top content scrolls off; when it grows, the
+        // new room appears below.
+        const keep_rows = @min(self.rows, rows);
+        const old_top = self.rows - keep_rows;
+        const new_top = rows - keep_rows;
         const copy_cols = @min(cols, self.cols);
         var r: u16 = 0;
-        while (r < copy_rows) : (r += 1) {
-            const src_start = @as(usize, r) * self.cols;
-            const dst_start = @as(usize, r) * cols;
+        while (r < keep_rows) : (r += 1) {
+            const src_start = @as(usize, old_top + r) * self.cols;
+            const dst_start = @as(usize, new_top + r) * cols;
             std.mem.copyForwards(
                 Cell,
                 new_cells[dst_start .. dst_start + copy_cols],
@@ -78,12 +85,18 @@ pub const Screen = struct {
         }
         self.allocator.free(self.cells);
         self.cells = new_cells;
+
+        // Translate cursor row by the same shift we applied to content.
+        const row_shift: i32 = @as(i32, rows) - @as(i32, self.rows);
+        const new_cursor_row = @as(i32, self.cursor_row) + row_shift;
+        self.cursor_row = @intCast(@max(0, @min(new_cursor_row, @as(i32, rows) - 1)));
+        if (self.cursor_col >= cols) self.cursor_col = cols - 1;
+
         self.cols = cols;
         self.rows = rows;
         self.scroll_top = 0;
         self.scroll_bot = rows - 1;
-        if (self.cursor_col >= cols) self.cursor_col = cols - 1;
-        if (self.cursor_row >= rows) self.cursor_row = rows - 1;
+        self.pending_wrap = false;
     }
 
     pub fn put(self: *Screen, ch: u21) void {
