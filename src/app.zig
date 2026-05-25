@@ -16,10 +16,12 @@ const NSWindowStyleMaskTitled: c_ulong = 1 << 0;
 const NSWindowStyleMaskClosable: c_ulong = 1 << 1;
 const NSWindowStyleMaskMiniaturizable: c_ulong = 1 << 2;
 const NSWindowStyleMaskResizable: c_ulong = 1 << 3;
+const NSWindowStyleMaskFullSizeContentView: c_ulong = 1 << 15;
 const NSBackingStoreBuffered: c_ulong = 2;
 const NSApplicationActivationPolicyRegular: c_long = 0;
 const NSViewWidthSizable: c_ulong = 1 << 1;
 const NSViewHeightSizable: c_ulong = 1 << 4;
+const NSWindowTitleHidden: c_long = 1;
 
 var g_screenshot_path: ?[*:0]const u8 = null;
 var g_shell_buf: [256]u8 = undefined;
@@ -31,6 +33,9 @@ var g_view_class: objc.Class = null;
 const window_w: f64 = 960;
 const window_h: f64 = 600;
 const tab_bar_h: f64 = 28;
+/// Reserved at the top of the content area so the traffic-light buttons don't
+/// overlap terminal cells when the titlebar is hidden.
+pub const title_pad_h: f64 = 28;
 
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
@@ -41,7 +46,7 @@ pub fn run() !void {
     // and doesn't render a misfitting prompt before the first SIGWINCH.
     font.init(13.0);
     g_initial_cols = @intCast(@max(20, @as(i64, @intFromFloat(@floor(window_w / font.metrics.cell_w)))));
-    g_initial_rows = @intCast(@max(5, @as(i64, @intFromFloat(@floor((window_h - tab_bar_h) / font.metrics.cell_h)))));
+    g_initial_rows = @intCast(@max(5, @as(i64, @intFromFloat(@floor((window_h - tab_bar_h - title_pad_h) / font.metrics.cell_h)))));
 
     g_shell_z = try resolveShell(&g_shell_buf);
     view.install();
@@ -111,7 +116,8 @@ fn createWindowImpl(allocator: std.mem.Allocator) !*wm.WindowCtx {
     const style: c_ulong = NSWindowStyleMaskTitled |
         NSWindowStyleMaskClosable |
         NSWindowStyleMaskMiniaturizable |
-        NSWindowStyleMaskResizable;
+        NSWindowStyleMaskResizable |
+        NSWindowStyleMaskFullSizeContentView;
 
     const window_alloc = objc.send(objc.id, NSWindow, objc.sel("alloc"));
     const window = objc.send4(
@@ -130,6 +136,11 @@ fn createWindowImpl(allocator: std.mem.Allocator) !*wm.WindowCtx {
         @as([*:0]const u8, "ZeroTerm"),
     );
     _ = objc.send1(void, window, objc.sel("setTitle:"), title);
+    // Hide the titlebar chrome — keep the traffic-light buttons but blend
+    // the bar background into the content (Kaku-style).
+    _ = objc.send1(void, window, objc.sel("setTitlebarAppearsTransparent:"), @as(objc.BOOL, 1));
+    _ = objc.send1(void, window, objc.sel("setTitleVisibility:"), NSWindowTitleHidden);
+    _ = objc.send1(void, window, objc.sel("setMovableByWindowBackground:"), @as(objc.BOOL, 1));
 
     const content = view.alloc(g_view_class);
     _ = objc.send1(void, content, objc.sel("setAutoresizingMask:"), NSViewWidthSizable | NSViewHeightSizable);
@@ -236,8 +247,65 @@ fn injectInput(_: ?*anyopaque) callconv(.c) void {
     t.write(g_inject_text) catch {};
 }
 
+extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
+
+fn dumpScreens() void {
+    var buf: [16 * 1024]u8 = undefined;
+    for (wm.contexts.items, 0..) |ctx, i| {
+        const sc_state = &ctx.state;
+        var ti: usize = 0;
+        for (sc_state.tabs.items) |tab| {
+            const t = lookupTerm(tab.root, tab.active) orelse {
+                ti += 1;
+                continue;
+            };
+            const sc = t.currentScreen();
+            const hdr = std.fmt.bufPrint(&buf, "\n=== win {} tab {} : {}x{}, sb={}, vo={}, cur=({},{}) ===\n", .{
+                i, ti, sc.cols, sc.rows, sc.scrollback.items.len, sc.view_offset, sc.cursor_col, sc.cursor_row,
+            }) catch return;
+            _ = write(2, hdr.ptr, hdr.len);
+            var r: u16 = 0;
+            while (r < sc.rows) : (r += 1) {
+                var n: usize = 0;
+                const head = std.fmt.bufPrint(buf[n..], "{d:3} |", .{r}) catch return;
+                n += head.len;
+                var c: u16 = 0;
+                while (c < sc.cols and n + 4 < buf.len) : (c += 1) {
+                    const cell = sc.cells[@as(usize, r) * sc.cols + c];
+                    if (cell.ch >= 0x20 and cell.ch < 0x7F) {
+                        buf[n] = @intCast(cell.ch);
+                        n += 1;
+                    } else if (cell.ch == ' ') {
+                        buf[n] = ' ';
+                        n += 1;
+                    } else {
+                        buf[n] = '?';
+                        n += 1;
+                    }
+                }
+                if (n + 2 < buf.len) {
+                    buf[n] = '|';
+                    n += 1;
+                    buf[n] = '\n';
+                    n += 1;
+                }
+                _ = write(2, @ptrCast(&buf[0]), n);
+            }
+            ti += 1;
+        }
+    }
+}
+
+fn lookupTerm(p: *@import("ui/state.zig").Pane, id: @import("ui/state.zig").PaneId) ?*term.Terminal {
+    return switch (p.*) {
+        .leaf => |l| if (l.id == id) l.terminal else null,
+        .split => |s| lookupTerm(s.a, id) orelse lookupTerm(s.b, id),
+    };
+}
+
 fn captureAndExit(_: ?*anyopaque) callconv(.c) void {
     if (wm.contexts.items.len == 0) return terminate();
+    if (objc.getenv("ZT_DUMP") != null) dumpScreens();
     const path_c = g_screenshot_path orelse return terminate();
     const view_obj = wm.contexts.items[0].view;
     const bounds = objc.send(objc.NSRect, view_obj, objc.sel("bounds"));

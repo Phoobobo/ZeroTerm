@@ -8,6 +8,7 @@ const font = @import("font.zig");
 const st = @import("state.zig");
 const term = @import("../term.zig");
 const screen_mod = @import("../vt/screen.zig");
+const proc = @import("../proc.zig");
 
 const State = st.State;
 const Pane = st.Pane;
@@ -116,6 +117,7 @@ pub fn refreshAppearance() void {
 }
 
 const tab_bar_h: f64 = 28.0;
+const title_pad_h: f64 = 28.0;
 const tab_padding_x: f64 = 12.0;
 const tab_gap: f64 = 4.0;
 const tab_font_size: f64 = 11.0;
@@ -128,12 +130,13 @@ pub fn render(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
     setFill(ctx, palette.paper);
     objc.CGContextFillRect(ctx, bounds);
 
-    // 2. Pane area — everything above the tab strip.
+    // 2. Pane area — between the tab strip at the bottom and the area
+    // reserved for the (transparent) titlebar at the top.
     const pane_area = Rect{
         .x = bounds.origin.x,
         .y = bounds.origin.y + tab_bar_h,
         .w = bounds.size.w,
-        .h = bounds.size.h - tab_bar_h,
+        .h = bounds.size.h - tab_bar_h - title_pad_h,
     };
     drawPane(ctx, state.currentTab().root, pane_area, state);
 
@@ -180,7 +183,7 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
                     rect.y + rect.h - 4,
                     1.0,
                     palette.divider,
-                    &.{ 2.0, 3.0 },
+                    null,
                 );
             },
             .top_bottom => {
@@ -197,7 +200,7 @@ fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void
                     rect.y + rect.h - top_h,
                     1.0,
                     palette.divider,
-                    &.{ 2.0, 3.0 },
+                    null,
                 );
             },
         },
@@ -395,9 +398,12 @@ fn drawTabs(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
     const attrs_active = makeTextAttrs(tab_font_size, palette.text_active);
     const attrs_muted = makeTextAttrs(tab_font_size, palette.text_muted);
 
+    var cwd_buf: [1024]u8 = undefined;
+
     for (state.tabs.items, 0..) |tab, idx| {
         const is_active = (idx == state.active_tab);
-        const text_w = measureText(tab.name, attrs_muted);
+        const label = tabLabel(tab, &cwd_buf);
+        const text_w = measureText(label, attrs_muted);
         const slot_w = text_w + 18;
         const slot_rect = Rect{ .x = x, .y = bar_y + 4, .w = slot_w, .h = tab_bar_h - 8 };
         if (is_active) {
@@ -407,10 +413,28 @@ fn drawTabs(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
                 .size = .{ .w = slot_rect.w, .h = slot_rect.h },
             });
         }
-        drawString(tab.name, .{ .x = x + 9, .y = bar_y + 7 }, if (is_active) attrs_active else attrs_muted);
+        drawString(label, .{ .x = x + 9, .y = bar_y + 7 }, if (is_active) attrs_active else attrs_muted);
         state.tab_hits.append(state.allocator, .{ .idx = idx, .rect = slot_rect }) catch {};
         x += slot_w + tab_gap;
     }
+}
+
+/// Display name for a tab: the basename of the focused shell's cwd. Falls
+/// back to the stored tab.name (e.g. "session 1") if proc_pidinfo can't
+/// resolve the cwd.
+fn tabLabel(tab: *st.Tab, buf: []u8) []const u8 {
+    const t = findTerminal(tab.root, tab.active) orelse return tab.name;
+    const cwd = proc.cwdOf(t.pty.pid, buf) orelse return tab.name;
+    const name = proc.basename(cwd);
+    if (name.len == 0) return tab.name;
+    return name;
+}
+
+fn findTerminal(p: *st.Pane, id: st.PaneId) ?*term.Terminal {
+    return switch (p.*) {
+        .leaf => |l| if (l.id == id) l.terminal else null,
+        .split => |s| findTerminal(s.a, id) orelse findTerminal(s.b, id),
+    };
 }
 
 fn inset(r: Rect, by: f64) Rect {

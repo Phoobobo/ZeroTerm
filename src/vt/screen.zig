@@ -101,18 +101,25 @@ pub const Screen = struct {
         const new_cells = try self.allocator.alloc(Cell, @as(usize, cols) * rows);
         for (new_cells) |*c| c.* = .{};
 
-        // Keep the bottom-most `min(old_rows, new_rows)` rows so the cursor /
-        // most recent output stays visible. This matches xterm behaviour: when
-        // the window shrinks, old top content scrolls off; when it grows, the
-        // new room appears below.
-        const keep_rows = @min(self.rows, rows);
-        const old_top = self.rows - keep_rows;
-        const new_top = rows - keep_rows;
+        // Anchor strategy:
+        //   growing (rows >= self.rows) → top-anchored, blanks appear below.
+        //     The cursor keeps its row index so the prompt stays put visually.
+        //   shrinking (rows < self.rows) → bottom-anchored, top rows scroll
+        //     off so the cursor stays in view (xterm behaviour).
+        var src_top: u16 = 0;
+        var keep_rows: u16 = 0;
+        if (rows >= self.rows) {
+            keep_rows = self.rows;
+            src_top = 0;
+        } else {
+            keep_rows = rows;
+            src_top = self.rows - rows;
+        }
         const copy_cols = @min(cols, self.cols);
         var r: u16 = 0;
         while (r < keep_rows) : (r += 1) {
-            const src_start = @as(usize, old_top + r) * self.cols;
-            const dst_start = @as(usize, new_top + r) * cols;
+            const src_start = @as(usize, src_top + r) * self.cols;
+            const dst_start = @as(usize, r) * cols;
             std.mem.copyForwards(
                 Cell,
                 new_cells[dst_start .. dst_start + copy_cols],
@@ -122,10 +129,10 @@ pub const Screen = struct {
         self.allocator.free(self.cells);
         self.cells = new_cells;
 
-        // Translate cursor row by the same shift we applied to content.
-        const row_shift: i32 = @as(i32, rows) - @as(i32, self.rows);
-        const new_cursor_row = @as(i32, self.cursor_row) + row_shift;
-        self.cursor_row = @intCast(@max(0, @min(new_cursor_row, @as(i32, rows) - 1)));
+        var new_cursor_row: i32 = @as(i32, self.cursor_row) - @as(i32, src_top);
+        if (new_cursor_row < 0) new_cursor_row = 0;
+        if (new_cursor_row >= @as(i32, rows)) new_cursor_row = @as(i32, rows) - 1;
+        self.cursor_row = @intCast(new_cursor_row);
         if (self.cursor_col >= cols) self.cursor_col = cols - 1;
 
         self.cols = cols;
