@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ZeroTerm is a macOS-only terminal emulator written in Zig, inspired by [Kaku](https://github.com/tw93/Kaku). The goal is the same calm "old paper" aesthetic and the same window / tab / pane ergonomics, at lower latency. Single-binary, no dependencies beyond the macOS SDK + Zig 0.16.
 
-What works today: shell spawning, async PTY pump, VT/xterm parser (printable + C0/C1 + CSI + DEC private + OSC + UTF-8), SGR colours (16 + 256 + truecolor), cursor positioning, erase / scroll regions, alt-screen swap (so vim / less / htop work), monospace cell rendering (JetBrains Mono → Menlo fallback), tabs, recursive pane tree with side-by-side and top-bottom splits, dotted dividers, bottom tab strip, mouse selection with copy-on-mouseup, Cmd-V paste (bracketed-paste-aware), light + dark theme picked from `NSApp.effectiveAppearance`, visual bell flash, multi-window via Cmd-N, scrollback (5 k-row ring), Shift-PageUp/Down navigation.
+What works today: shell spawning, async PTY pump, VT/xterm parser (printable + C0/C1 + CSI + DEC private + OSC + UTF-8), SGR colours (16 + 256 + truecolor), cursor positioning, erase / scroll regions, alt-screen swap (so vim / less / htop work), monospace cell rendering (JetBrains Mono → Menlo fallback), tabs, recursive pane tree with side-by-side and top-bottom splits, dotted dividers, bottom tab strip, mouse selection with copy-on-mouseup, Cmd-V paste (bracketed-paste-aware), light + dark theme picked from `NSApp.effectiveAppearance`, visual bell flash, multi-window via Cmd-N, scrollback (5 k-row ring) navigable by Shift-PageUp/Down and the scroll wheel, pane zoom (Cmd-Shift-Enter), split-divider resize (Cmd-Ctrl-arrows) and direction toggle (Cmd-Shift-S), window hide/minimise/fullscreen, and shell-editing key bridges (Cmd/Opt + arrows → readline motions).
 
 ## Build / run / test
 
@@ -34,6 +34,7 @@ Several env vars drive a built-in test harness that scripts user actions and wri
 | `ZT_SCREENSHOT=path` | Capture window to `path` and quit. |
 | `ZT_SCREENSHOT_DELAY_MS=ms` | When to take the shot (default 1500). |
 | `ZT_PRESPLIT=v[,h,v,…]` | Split the active pane before snapshot. |
+| `ZT_PREZOOM=1` | Zoom the active pane (after splits). |
 | `ZT_PRENEWTAB=n` | Open N additional tabs. |
 | `ZT_PRENEWWIN=n` | Open N additional windows. |
 | `ZT_INPUT="text"` | Write `text` (with `\n` / `\t` / `\r` escapes) to the focused pane after 700 ms. |
@@ -86,19 +87,32 @@ Term-stack data flow:
 | --- | --- |
 | Cmd-T | new tab |
 | Cmd-N | new window |
-| Cmd-W | close pane (collapses split) or close tab |
+| Cmd-W | close pane (collapses split), else close tab, else hide app |
+| Cmd-Shift-W | force-close the current tab |
 | Cmd-Q | quit |
+| Cmd-H | hide app |
+| Cmd-M | minimise window |
+| Cmd-Ctrl-F | toggle fullscreen |
 | Cmd-D | split active pane side-by-side |
 | Cmd-Shift-D | split active pane top/bottom |
+| Cmd-Shift-S | toggle the active split's direction |
+| Cmd-Shift-Enter | zoom / unzoom the active pane |
 | Cmd-1 … Cmd-9 | select tab N |
 | Cmd-[ / Cmd-] | cycle tabs |
 | Cmd-Opt-arrows | focus spatial neighbour pane |
-| Cmd-K | clear screen (sends Ctrl-L) |
+| Cmd-Ctrl-arrows | resize the parent split's divider |
+| Cmd-K | clear screen + scrollback (sends Ctrl-L) |
 | Cmd-C | copy selection |
 | Cmd-V | paste (bracketed if mode 2004 is on) |
 | Cmd-A | select all visible cells in focused pane |
+| Cmd-Left / Cmd-Right | line start / end (Ctrl-A / Ctrl-E) |
+| Cmd-Delete | delete to line start (Ctrl-U) |
+| Cmd-Enter / Shift-Enter | insert newline without executing |
+| Opt-Left / Opt-Right | word back / forward (Meta-b / Meta-f) |
+| Opt-Delete | delete previous word (Ctrl-W) |
 | Cmd-Shift-G | run `lazygit` |
 | Cmd-Shift-Y | run `yazi` |
+| Scroll wheel | scroll history |
 | Shift-PageUp/Down | scroll history a page |
 | Shift-Up/Down | scroll history one line |
 

@@ -66,6 +66,8 @@ pub const State = struct {
     active_tab: usize,
     next_id: PaneId,
     selection: ?Selection = null,
+    /// When non-null, only this leaf renders full-pane-area (Cmd-Shift-Enter).
+    zoomed_leaf: ?PaneId = null,
 
     // Hit-box caches populated by the draw pass and consumed by mouseDown.
     tab_hits: std.ArrayList(TabHit),
@@ -308,6 +310,58 @@ pub const State = struct {
         if (best_id) |id| self.currentTab().active = id;
     }
 
+    fn findParentSplit(p: *Pane, id: PaneId) ?*SplitNode {
+        switch (p.*) {
+            .leaf => return null,
+            .split => {
+                const s = &p.split;
+                if (matchesLeaf(s.a, id) or matchesLeaf(s.b, id)) return s;
+                if (findParentSplit(s.a, id)) |x| return x;
+                if (findParentSplit(s.b, id)) |x| return x;
+                return null;
+            },
+        }
+    }
+
+    pub fn toggleZoom(self: *State) void {
+        const id = self.currentTab().active;
+        if (self.zoomed_leaf == id) {
+            self.zoomed_leaf = null;
+        } else {
+            self.zoomed_leaf = id;
+        }
+    }
+
+    pub fn toggleSplitDirection(self: *State) void {
+        const tab = self.currentTab();
+        const sp = findParentSplit(tab.root, tab.active) orelse return;
+        sp.kind = if (sp.kind == .side_by_side) .top_bottom else .side_by_side;
+    }
+
+    /// Move the divider toward `dir`. Only the immediate parent split is
+    /// affected; arrow direction must match the split's axis.
+    pub fn resizeActivePane(self: *State, dir: Direction) void {
+        const tab = self.currentTab();
+        const sp = findParentSplit(tab.root, tab.active) orelse return;
+        const step: f32 = 0.04;
+        const min: f32 = 0.1;
+        const max: f32 = 0.9;
+        switch (dir) {
+            .left => if (sp.kind == .side_by_side) {
+                sp.ratio = @max(min, sp.ratio - step);
+            },
+            .right => if (sp.kind == .side_by_side) {
+                sp.ratio = @min(max, sp.ratio + step);
+            },
+            .up => if (sp.kind == .top_bottom) {
+                sp.ratio = @min(max, sp.ratio + step);
+            },
+            .down => if (sp.kind == .top_bottom) {
+                sp.ratio = @max(min, sp.ratio - step);
+            },
+        }
+    }
+
     pub fn cyclePane(self: *State, delta: isize) void {
         const tab = self.currentTab();
         var leaves: std.ArrayList(PaneId) = .empty;
@@ -392,4 +446,59 @@ test "closeTab keeps last tab" {
     try s.newTab();
     s.closeTab();
     try std.testing.expectEqual(@as(usize, 1), s.tabs.items.len);
+}
+
+test "toggleZoom flips between active id and null" {
+    var s = try State.init(std.testing.allocator, null);
+    defer s.deinit();
+    const id = s.currentTab().active;
+    try std.testing.expectEqual(@as(?PaneId, null), s.zoomed_leaf);
+    s.toggleZoom();
+    try std.testing.expectEqual(@as(?PaneId, id), s.zoomed_leaf);
+    s.toggleZoom();
+    try std.testing.expectEqual(@as(?PaneId, null), s.zoomed_leaf);
+}
+
+test "toggleSplitDirection flips parent split axis" {
+    var s = try State.init(std.testing.allocator, null);
+    defer s.deinit();
+    // No split yet — must be a safe no-op.
+    s.toggleSplitDirection();
+    try s.splitActive(.side_by_side);
+    try std.testing.expect(s.currentTab().root.split.kind == .side_by_side);
+    s.toggleSplitDirection();
+    try std.testing.expect(s.currentTab().root.split.kind == .top_bottom);
+    s.toggleSplitDirection();
+    try std.testing.expect(s.currentTab().root.split.kind == .side_by_side);
+}
+
+test "resizeActivePane moves divider only along its axis" {
+    var s = try State.init(std.testing.allocator, null);
+    defer s.deinit();
+    // No split — no-op, no crash.
+    s.resizeActivePane(.left);
+    try s.splitActive(.side_by_side);
+    const sp = &s.currentTab().root.split;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sp.ratio, 1e-6);
+    // Wrong axis (vertical move on a side_by_side split) does nothing.
+    s.resizeActivePane(.up);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sp.ratio, 1e-6);
+    // Right grows ratio, left shrinks it.
+    s.resizeActivePane(.right);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.54), sp.ratio, 1e-6);
+    s.resizeActivePane(.left);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sp.ratio, 1e-6);
+}
+
+test "resizeActivePane clamps within bounds" {
+    var s = try State.init(std.testing.allocator, null);
+    defer s.deinit();
+    try s.splitActive(.side_by_side);
+    const sp = &s.currentTab().root.split;
+    var i: usize = 0;
+    while (i < 100) : (i += 1) s.resizeActivePane(.right);
+    try std.testing.expect(sp.ratio <= 0.9 + 1e-6);
+    i = 0;
+    while (i < 100) : (i += 1) s.resizeActivePane(.left);
+    try std.testing.expect(sp.ratio >= 0.1 - 1e-6);
 }

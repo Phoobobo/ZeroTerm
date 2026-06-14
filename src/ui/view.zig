@@ -56,6 +56,7 @@ pub fn registerClass() objc.Class {
     _ = objc.class_addMethod(cls, objc.sel("mouseDown:"), @as(objc.IMP, @ptrCast(&implMouseDown)), "v@:@");
     _ = objc.class_addMethod(cls, objc.sel("mouseDragged:"), @as(objc.IMP, @ptrCast(&implMouseDragged)), "v@:@");
     _ = objc.class_addMethod(cls, objc.sel("mouseUp:"), @as(objc.IMP, @ptrCast(&implMouseUp)), "v@:@");
+    _ = objc.class_addMethod(cls, objc.sel("scrollWheel:"), @as(objc.IMP, @ptrCast(&implScrollWheel)), "v@:@");
     objc.objc_registerClassPair(cls);
     return cls;
 }
@@ -96,7 +97,7 @@ fn implDrawRect(self: objc.id, _: objc.SEL, _: objc.NSRect) callconv(.c) void {
 
 fn implKeyDown(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
     const state = stateOf(self) orelse return;
-    const consumed = handleKeyDown(event, state);
+    const consumed = handleKeyDown(event, state, self);
     if (consumed) markNeedsDisplay(self);
 }
 
@@ -116,6 +117,18 @@ fn implMouseUp(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
     const state = stateOf(self) orelse return;
     _ = event;
     if (handleMouseUp(state)) markNeedsDisplay(self);
+}
+
+fn implScrollWheel(self: objc.id, _: objc.SEL, event: objc.id) callconv(.c) void {
+    const state = stateOf(self) orelse return;
+    const dy = objc.send(f64, event, objc.sel("scrollingDeltaY"));
+    // Roughly one line per 8 logical pixels of scroll. Up-scroll = positive
+    // deltaY = view back into scrollback.
+    const lines: i32 = @intFromFloat(dy / 8.0);
+    if (lines == 0) return;
+    const t = state.focusedTerminal() orelse return;
+    t.currentScreen().scrollViewBy(lines);
+    markNeedsDisplay(self);
 }
 
 fn eventLocalPoint(self: objc.id, event: objc.id) objc.NSPoint {
@@ -142,7 +155,7 @@ fn markNeedsDisplay(view: objc.id) void {
     _ = objc.send1(void, view, objc.sel("setNeedsDisplay:"), @as(objc.BOOL, 1));
 }
 
-fn handleKeyDown(event: objc.id, state: *State) bool {
+fn handleKeyDown(event: objc.id, state: *State, view_self: objc.id) bool {
     const mods = objc.send(u64, event, objc.sel("modifierFlags"));
     const cmd = (mods & NSEventModifierFlagCommand) != 0;
     const shift = (mods & NSEventModifierFlagShift) != 0;
@@ -169,14 +182,33 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
                 return true;
             },
             'w', 'W' => {
-                // Pane-aware close: close focused pane first; close tab when the
-                // tab is one pane; do nothing if it's the last tab.
-                if (!state.closeActivePane()) state.closeTab();
+                if (shift) {
+                    // Cmd-Shift-W — force-close the current tab.
+                    state.closeTab();
+                } else if (!state.closeActivePane()) {
+                    if (state.tabs.items.len > 1) {
+                        state.closeTab();
+                    } else {
+                        // Last pane of last tab → hide the app (Kaku behaviour).
+                        const NSApp = objc.send(objc.id, objc.cls("NSApplication"), objc.sel("sharedApplication"));
+                        _ = objc.send1(void, NSApp, objc.sel("hide:"), @as(objc.id, null));
+                    }
+                }
                 return true;
             },
             'n', 'N' => {
                 windows.requestNewWindow();
                 return false;
+            },
+            'h', 'H' => {
+                const NSApp = objc.send(objc.id, objc.cls("NSApplication"), objc.sel("sharedApplication"));
+                _ = objc.send1(void, NSApp, objc.sel("hide:"), @as(objc.id, null));
+                return true;
+            },
+            'm', 'M' => {
+                const window_obj = objc.send(objc.id, view_self, objc.sel("window"));
+                _ = objc.send1(void, window_obj, objc.sel("miniaturize:"), @as(objc.id, null));
+                return true;
             },
             'd', 'D' => {
                 const kind: SplitKind = if (shift) .top_bottom else .side_by_side;
@@ -196,10 +228,24 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
                 return true;
             },
             'k', 'K' => {
-                // Clear screen — feed Ctrl-L to the shell (preferred path so
-                // the shell knows the screen cleared).
-                if (state.focusedTerminal()) |t| t.write("\x0C") catch {};
+                // Clear screen + scrollback. Feed Ctrl-L to the shell so it
+                // knows the screen cleared, and wipe our local scrollback.
+                if (state.focusedTerminal()) |t| {
+                    t.write("\x0C") catch {};
+                    const sc = t.currentScreen();
+                    for (sc.scrollback.items) |row| sc.allocator.free(row.cells);
+                    sc.scrollback.clearRetainingCapacity();
+                    sc.view_offset = 0;
+                }
                 return true;
+            },
+            'f', 'F' => {
+                if (ctrl) {
+                    const window_obj = objc.send(objc.id, view_self, objc.sel("window"));
+                    _ = objc.send1(void, window_obj, objc.sel("toggleFullScreen:"), @as(objc.id, null));
+                    return true;
+                }
+                return false;
             },
             'c', 'C' => {
                 if (state.selection) |sel| {
@@ -244,6 +290,40 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
             else => {},
         };
 
+        // Cmd-Ctrl-arrows: resize the parent split's divider.
+        if (ctrl) switch (first_ch) {
+            NSLeftArrowFunctionKey => {
+                state.resizeActivePane(.left);
+                return true;
+            },
+            NSRightArrowFunctionKey => {
+                state.resizeActivePane(.right);
+                return true;
+            },
+            NSUpArrowFunctionKey => {
+                state.resizeActivePane(.up);
+                return true;
+            },
+            NSDownArrowFunctionKey => {
+                state.resizeActivePane(.down);
+                return true;
+            },
+            else => {},
+        };
+
+        // Cmd-Shift-Enter zoom; Cmd-Shift-S toggle split direction.
+        if (shift) switch (first_ch) {
+            0x0D => {
+                state.toggleZoom();
+                return true;
+            },
+            's', 'S' => {
+                state.toggleSplitDirection();
+                return true;
+            },
+            else => {},
+        };
+
         // Cmd-Shift-G → lazygit, Cmd-Shift-Y → yazi (Kaku quick-launch).
         if (shift) switch (first_ch) {
             'g', 'G' => {
@@ -257,8 +337,40 @@ fn handleKeyDown(event: objc.id, state: *State) bool {
             else => {},
         };
 
+        // Cmd + shell-editing keys → equivalent readline bytes.
+        switch (first_ch) {
+            NSLeftArrowFunctionKey => {
+                if (state.focusedTerminal()) |t| t.write("\x01") catch {}; // Ctrl-A
+                return true;
+            },
+            NSRightArrowFunctionKey => {
+                if (state.focusedTerminal()) |t| t.write("\x05") catch {}; // Ctrl-E
+                return true;
+            },
+            0x7F => {
+                if (state.focusedTerminal()) |t| t.write("\x15") catch {}; // Ctrl-U
+                return true;
+            },
+            0x0D => {
+                if (state.focusedTerminal()) |t| t.write("\n") catch {}; // newline w/o execute
+                return true;
+            },
+            else => {},
+        }
+
         return false;
     }
+
+    // Opt (without cmd) — left Option as Meta + word-motion shortcuts.
+    if (opt) switch (first_ch) {
+        NSLeftArrowFunctionKey => return sendToFocused(state, "\x1bb"),
+        NSRightArrowFunctionKey => return sendToFocused(state, "\x1bf"),
+        0x7F => return sendToFocused(state, "\x17"),
+        else => {},
+    };
+
+    // Shift-Enter inserts a literal newline without executing.
+    if (shift and first_ch == 0x0D) return sendToFocused(state, "\n");
 
     // Shift-PageUp/PageDown and Shift-Up/Down navigate scrollback.
     if (shift) switch (first_ch) {
@@ -352,6 +464,14 @@ fn translateKey(ch: u16, mods: u64, buf: *[16]u8) ?[]const u8 {
         0x1B => "\x1b",
         else => null,
     };
+}
+
+fn sendToFocused(state: *State, bytes: []const u8) bool {
+    const t = state.focusedTerminal() orelse return false;
+    state.selection = null;
+    t.currentScreen().snapToLive();
+    t.write(bytes) catch {};
+    return true;
 }
 
 fn handleMouseDown(p: objc.NSPoint, state: *State) bool {

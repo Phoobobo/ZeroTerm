@@ -138,7 +138,17 @@ pub fn render(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
         .w = bounds.size.w,
         .h = bounds.size.h - tab_bar_h - title_pad_h,
     };
-    drawPane(ctx, state.currentTab().root, pane_area, state);
+    if (state.zoomed_leaf) |zid| {
+        // Walk to find the zoomed leaf and render only it, filling pane_area.
+        if (zoomedLeafPane(state.currentTab().root, zid)) |p| {
+            drawPane(ctx, p, pane_area, state);
+        } else {
+            // Stale zoom id (pane was closed) — fall back to normal tree.
+            drawPane(ctx, state.currentTab().root, pane_area, state);
+        }
+    } else {
+        drawPane(ctx, state.currentTab().root, pane_area, state);
+    }
 
     // 3. Separator above the tab strip.
     strokeLine(
@@ -154,6 +164,13 @@ pub fn render(ctx: objc.CGContextRef, bounds: objc.NSRect, state: *State) void {
 
     // 4. Tab strip.
     drawTabs(ctx, bounds, state);
+}
+
+fn zoomedLeafPane(p: *Pane, id: st.PaneId) ?*Pane {
+    return switch (p.*) {
+        .leaf => |l| if (l.id == id) p else null,
+        .split => |s| zoomedLeafPane(s.a, id) orelse zoomedLeafPane(s.b, id),
+    };
 }
 
 fn drawPane(ctx: objc.CGContextRef, pane: *Pane, rect: Rect, state: *State) void {

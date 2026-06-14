@@ -159,6 +159,7 @@ fn createWindowImpl(allocator: std.mem.Allocator) !*wm.WindowCtx {
 ///   ZT_PRESPLIT=v       — split active pane side-by-side
 ///   ZT_PRESPLIT=v,h     — chain splits
 ///   ZT_PRENEWTAB=n      — open N additional tabs
+///   ZT_PREZOOM=1        — zoom the active pane (after splits)
 ///   ZT_PRENEWWIN=n      — open N additional windows
 ///   ZT_INPUT="text"     — write `text` (with \n interpreted) to focused pane
 ///   ZT_SCREENSHOT=path  — capture the first window to a PNG at exit
@@ -192,6 +193,8 @@ fn scheduleHarness() void {
             state.splitActive(kind) catch {};
         }
     }
+
+    if (objc.getenv("ZT_PREZOOM") != null) state.toggleZoom();
 
     if (objc.getenv("ZT_INPUT")) |p| {
         const inp = std.mem.span(p);
