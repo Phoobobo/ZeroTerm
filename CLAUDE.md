@@ -41,6 +41,17 @@ Several env vars drive a built-in test harness that scripts user actions and wri
 
 Example: `ZT_PRESPLIT=v ZT_INPUT="ls\\n" ZT_SCREENSHOT=/tmp/z.png ./zig-out/bin/zeroterm`.
 
+### Visual test rule
+
+For any change that touches AppKit view/window code, pane/tab layout, drawing, font metrics, terminal resizing, screenshot capture, or renderer/backend plumbing, run a visual smoke test in addition to `zig build test`.
+
+```sh
+zig build
+env 'ZT_PRESPLIT=v,h' 'ZT_PRENEWTAB=2' 'ZT_INPUT=echo ZeroTerm visual smoke test\npwd\n' 'ZT_SCREENSHOT=/private/tmp/zeroterm-visual-clean.png' 'ZT_SCREENSHOT_DELAY_MS=2500' ./zig-out/bin/zeroterm
+```
+
+Open the captured PNG and verify it is nonblank, has the expected three tabs, shows nested split dividers, renders prompt/output text clearly, keeps the cursor visible, and has no obvious overlap or clipped text. Mention the screenshot path and any visual issues in the final handoff.
+
 ## Architecture
 
 Three loosely coupled stacks. The **UI stack** owns the window, tabs, panes, drawing, and event loop. The **term stack** runs the shell, parses VT sequences into a screen grid, and notifies the UI on dirty. The **windows registry** maps `NSView` instances back to their owning `State` so a single custom view class can serve every window.

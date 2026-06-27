@@ -5,6 +5,11 @@ pub fn build(b: *std.Build) void {
         .default_target = .{ .os_tag = .macos },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const use_ghostty = b.option(
+        bool,
+        "ghostty",
+        "Use the experimental libghostty-vt terminal backend",
+    ) orelse false;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -12,6 +17,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const options = b.addOptions();
+    options.addOption(bool, "use_ghostty", use_ghostty);
+    root_module.addOptions("build_options", options);
 
     // macOS frameworks — AppKit for the window/event loop, Core Text + Metal
     // are linked ahead of the renderer landing so the build doesn't churn

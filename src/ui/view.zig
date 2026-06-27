@@ -52,6 +52,10 @@ pub fn registerClass() objc.Class {
     _ = objc.class_addMethod(cls, objc.sel("drawRect:"), @as(objc.IMP, @ptrCast(&implDrawRect)), "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
     _ = objc.class_addMethod(cls, objc.sel("acceptsFirstResponder"), @as(objc.IMP, @ptrCast(&implAcceptsFirstResponder)), "c@:");
     _ = objc.class_addMethod(cls, objc.sel("isFlipped"), @as(objc.IMP, @ptrCast(&implIsFlipped)), "c@:");
+    // Claim our own mouse events. Without this, a window whose
+    // movableByWindowBackground is YES treats clicks/drags in the content view
+    // as window-move gestures and never delivers mouseDown:/Dragged:/Up:.
+    _ = objc.class_addMethod(cls, objc.sel("mouseDownCanMoveWindow"), @as(objc.IMP, @ptrCast(&implMouseDownCanMoveWindow)), "c@:");
     _ = objc.class_addMethod(cls, objc.sel("keyDown:"), @as(objc.IMP, @ptrCast(&implKeyDown)), "v@:@");
     _ = objc.class_addMethod(cls, objc.sel("mouseDown:"), @as(objc.IMP, @ptrCast(&implMouseDown)), "v@:@");
     _ = objc.class_addMethod(cls, objc.sel("mouseDragged:"), @as(objc.IMP, @ptrCast(&implMouseDragged)), "v@:@");
@@ -84,6 +88,11 @@ fn implAcceptsFirstResponder(self: objc.id, _: objc.SEL) callconv(.c) objc.BOOL 
 }
 
 fn implIsFlipped(self: objc.id, _: objc.SEL) callconv(.c) objc.BOOL {
+    _ = self;
+    return 0;
+}
+
+fn implMouseDownCanMoveWindow(self: objc.id, _: objc.SEL) callconv(.c) objc.BOOL {
     _ = self;
     return 0;
 }
